@@ -1,5 +1,7 @@
+import { hasPendingNativeChildCompletion } from "./native-child-completion-delivery.js";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
-import { readPersistedNativeModelRejection } from "./native-provider-failure-evidence.js";
+import { executionFailureRetryCount } from "../execution-recovery-attempt.js";
+import { readPersistedNativeProviderFailure } from "./native-provider-failure-evidence.js";
 import { dismissAutomaticCompletionReviews } from "./automatic-completion-reviews.js";
 import { getNativeReviewAssignment, readNativeReviewAssignmentContext } from "./native-review-participant.js";
 import { conversationNativeDecision, isConversation } from "../agent-conversations.js";
@@ -1263,9 +1265,9 @@ export async function finalizeNativeRun(input: {
         issueId: authoritativeIssue.id,
         runId: run.id,
       }),
-      assessment.reportedDisposition === "yielded" &&
+      (terminalState === "failed" || (assessment.reportedDisposition === "yielded" &&
       assessment.continuation?.kind === "response_wake" &&
-      assessment.hasBlockingRemainingWork
+      assessment.hasBlockingRemainingWork))
         ? issueTreeControlService(input.db).getActivePauseHoldGate(
             run.companyId, authoritativeIssue.id,
           )
@@ -1276,15 +1278,26 @@ export async function finalizeNativeRun(input: {
       companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId,
       contextSnapshot: reviewContext, allowResolvedByRunId: run.id,
     }) : null;
-    const providerModelRejection = await readPersistedNativeModelRejection(
+    const providerFailure = await readPersistedNativeProviderFailure(
       input.db, run, resultRow.turnId, envelope.terminal as PrpTerminalState,
     );
-    const ownsModelRejectionDecision =
+    const ownsProviderFailureDecision =
       (!authoritativeIssue.executionRunId || authoritativeIssue.executionRunId === run.id) &&
       (reviewContext ? nativeReview?.interaction.status === "pending"
         : authoritativeIssue.assigneeAgentId === run.agentId && !authoritativeIssue.assigneeUserId);
+    const childCompletionRecipient = {
+      companyId: run.companyId, issueId: authoritativeIssue.id, agentId: run.agentId, runId: run.id,
+      sourceIntentId: typeof record(run.contextSnapshot).nativeStatusWakeIntentId === "string"
+        ? record(run.contextSnapshot).nativeStatusWakeIntentId as string : null,
+    };
+    const hasPendingChildCompletion = !reviewContext &&
+      await hasPendingNativeChildCompletion(input.db, childCompletionRecipient);
     const proposedDecision = resolveNativeFinalizerStatus({
-      providerModelRejected: providerModelRejection !== null && ownsModelRejectionDecision,
+      hasPendingChildCompletion,
+      providerModelRejected: providerFailure?.errorCode === "native_provider_model_rejected" && ownsProviderFailureDecision,
+      providerOverloaded: providerFailure?.errorCode === "native_provider_overloaded" && ownsProviderFailureDecision,
+      providerFailureSuperseded: providerFailure?.errorCode === "native_provider_overloaded" && !ownsProviderFailureDecision,
+      failureRetryCount: executionFailureRetryCount(run),
       ...(reviewContext ? { nativeReviewOutcome: nativeReview
         ? nativeReview.interaction.status === "pending" ? "pending" as const : "resolved" as const
         : "stale" as const } : {}),
@@ -1367,9 +1380,13 @@ export async function finalizeNativeRun(input: {
         priorStatusVersion: Number(authoritativeIssue.statusVersion),
         priorDecisionId: authoritativeIssue.lastStatusDecisionId,
         decision,
+        requireNoPendingChildCompletion: decision.statusAction === "done" && !reviewContext
+          ? childCompletionRecipient : undefined,
         requireModelRejectionOwner: decision.reasonCode === "native_provider_model_rejected"
           ? { agentId: run.agentId, reviewContext }
           : undefined,
+        requireProviderFailureOwner: decision.reasonCode?.startsWith("native_provider_overloaded")
+          ? { agentId: run.agentId, reviewContext } : undefined,
         requireBoardResponseWaitSource:
           decision.reasonCode === "board_response_waiting" || repairBoardResponseWait
             ? boardResponseWait?.source
@@ -1412,7 +1429,7 @@ export async function finalizeNativeRun(input: {
       );
       const clearExecutionFailure = input.projectRunStatus && finalizationPhase === "committed" && terminalState === "succeeded";
       const finalizationMetadata = {
-        ...(providerModelRejection ? { nativeProviderFailure: providerModelRejection.diagnostic } : {}),
+        ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
         finalizationPhase,
         ...(finalizationPhase === "committed" ? { failureCode: null, originalFailureCode: null, nextAttemptAt: null } : {}),
         assessmentId: assessmentRow.id,
@@ -1463,11 +1480,11 @@ export async function finalizeNativeRun(input: {
           nativePhase: finalizationPhase,
           nativePhaseUpdatedAt: now,
           ...(clearExecutionFailure ? { error: null, errorCode: null } : {}),
-          ...(providerModelRejection ? {
+          ...(providerFailure ? {
             // Recovery can finalize before heartbeat saves the adapter result.
             // Retain any independently recorded execution/cleanup failure.
-            error: sql`coalesce(${heartbeatRuns.error}, ${providerModelRejection.errorMessage})`,
-            errorCode: sql`coalesce(${heartbeatRuns.errorCode}, ${providerModelRejection.errorCode})`,
+            error: sql`coalesce(${heartbeatRuns.error}, ${providerFailure.errorMessage})`,
+            errorCode: sql`coalesce(${heartbeatRuns.errorCode}, ${providerFailure.errorCode})`,
           } : {}),
           resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
             || ${JSON.stringify(finalizationMetadata)}::jsonb

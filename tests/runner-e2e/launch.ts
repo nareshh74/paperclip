@@ -679,6 +679,7 @@ async function runAttempt(input: {
         executions.map((candidate) => candidate.id),
       ),
       PAPERCLIP_RUNNER_E2E_ATTEMPT: String(attempt),
+      PAPERCLIP_RUNNER_E2E_PUBLIC_MCP: executions.some(candidate => candidate.task.flow === "public_mcp") ? "1" : "0",
       PAPERCLIP_RUNNER_E2E_PORT: String(port),
       PAPERCLIP_RUNNER_E2E_TEMP_ROOT: temporaryRoot,
       PAPERCLIP_RUNNER_E2E_PRIVATE_DIR: privateDir,
@@ -1082,6 +1083,13 @@ async function main() {
     );
     return;
   }
+
+  if (executions.some(execution => execution.task.flow === "provider_connection")) {
+    const { runConnectionCampaign } = await import("./connection-launch.js");
+    await runConnectionCampaign({ executions, catalog: runnerMatrix, configFile: options.connectionConfig, repositoryRoot });
+    return;
+  }
+  if (options.connectionConfig) throw new Error("--connection-config is only supported by the provider-connections suite");
 
   // Keep admission before local-env loading and credential checks. Pending
   // profiles remain discoverable, but cannot reach a provider.

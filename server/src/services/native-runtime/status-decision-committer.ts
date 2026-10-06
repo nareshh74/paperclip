@@ -1,3 +1,4 @@
+import { hasPendingNativeChildCompletion, type NativeChildCompletionRecipient } from "./native-child-completion-delivery.js";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { CreateIssueThreadInteraction } from "@paperclipai/shared";
@@ -49,6 +50,8 @@ import {
   type ActivityPublication,
 } from "../activity-log.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
+import { materializeNativeProviderCapacityRetry } from "./native-provider-capacity-retry.js";
+import { NATIVE_PROVIDER_OVERLOADED_CODE } from "./native-provider-failure.js";
 
 export class NativeStatusRaceError extends Error {
   readonly code = "native_status_race" as const;
@@ -788,6 +791,14 @@ async function materializeDecisionEffect(input: {
   }
   if (effect.kind === "schedule_retry") {
     failAt("continuation_materialization", input.failpoint);
+    if (effect.cause === NATIVE_PROVIDER_OVERLOADED_CODE) {
+      const retryId = await materializeNativeProviderCapacityRetry({
+        tx: input.tx as unknown as Db, companyId: input.companyId,
+        issueId: input.issue.id, runId: input.runId, agentId: effect.agentId,
+      });
+      return { effectKind: effect.kind, targetType: "heartbeat_run", targetId: retryId,
+        payload: { cause: effect.cause, summary: effect.summary } };
+    }
     const wakeId = await enqueueWake({
       tx: input.tx,
       companyId: input.companyId,
@@ -1536,7 +1547,9 @@ export async function commitNativeStatusDecision(input: {
   preMaterializedEffects?: NativeMaterializedStatusEffect[];
   supersedesCommittedDecisionId?: string;
   requireExternalChatResponseWaitAuthorization?: { agentId: string };
+  requireNoPendingChildCompletion?: NativeChildCompletionRecipient;
   requireModelRejectionOwner?: { agentId: string; reviewContext: NativeReviewAssignmentContext | null };
+  requireProviderFailureOwner?: { agentId: string; reviewContext: NativeReviewAssignmentContext | null };
   requireBoardResponseWaitSource?: NativeBoardResponseWaitSource;
   requireBoardResponseWaitOrigin?: NativeBoardResponseWaitOrigin;
   reviewResponsePresentation?: {
@@ -1551,6 +1564,9 @@ export async function commitNativeStatusDecision(input: {
   const reasonCode = input.decision.reasonCode;
   if (reasonCode === "native_provider_model_rejected" && !input.requireModelRejectionOwner) {
     throw new Error("native_model_rejection_owner_required");
+  }
+  if (reasonCode.startsWith("native_provider_overloaded") && !input.requireProviderFailureOwner) {
+    throw new Error("native_provider_failure_owner_required");
   }
   const publications: ActivityPublication[] = [];
   const terminalRunsToEmit: (typeof heartbeatRuns.$inferSelect)[] = [];
@@ -1621,8 +1637,13 @@ export async function commitNativeStatusDecision(input: {
     ) {
       throw new NativeStatusRaceError();
     }
-    if (input.requireModelRejectionOwner) {
-      const owner = input.requireModelRejectionOwner;
+    // Recheck under the parent status lock: a child can finish between the
+    // finalizer's read and this commit. Re-arbitrate instead of discarding its wake.
+    if (input.requireNoPendingChildCompletion && await hasPendingNativeChildCompletion(
+      tx as unknown as Db, input.requireNoPendingChildCompletion,
+    )) throw new NativeStatusRaceError();
+    if (input.requireModelRejectionOwner || input.requireProviderFailureOwner) {
+      const owner = (input.requireProviderFailureOwner ?? input.requireModelRejectionOwner)!;
       // A successor can claim execution without changing statusVersion. Keep
       // this new blocking authority behind the same locked issue snapshot.
       if (issue.executionRunId && issue.executionRunId !== input.runId) throw new NativeStatusRaceError();
@@ -1889,6 +1910,16 @@ export async function commitNativeStatusDecision(input: {
       );
     }
 
+    if (input.decision.statusAction === "done" && issue.status !== "done" &&
+        issue.parentId && issue.originKind !== "task_watchdog") {
+      // Serialize child notification creation with the parent's final pending-
+      // result check. Lock before child writes can acquire an implicit parent
+      // foreign-key lock, so concurrent siblings never upgrade shared locks.
+      await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, issue.parentId), eq(issues.companyId, input.companyId),
+      )).for("update");
+    }
+
     const materialized: NativeMaterializedStatusEffect[] = [];
     const preMaterializedEffects = new Map(
       (input.preMaterializedEffects ?? []).map((effect) => [
@@ -1985,10 +2016,20 @@ export async function commitNativeStatusDecision(input: {
       const parentIsDependent = parent
         ? dependents.some((dependent) => dependent.id === parent.id)
         : false;
+      // Ordinary children can finish new work after reopening. Key that wake to
+      // the committed decision; replaying the decision still shares its identity.
+      // Watchdog children retain their stable key to avoid feedback loops.
+      const childCompletionDecisionId = issue.originKind === "task_watchdog" ? null : decisionRow.id;
+      const childCompletionRevision = childCompletionDecisionId ? `:${childCompletionDecisionId}` : "";
+      // The dispatcher must retain this new input until a fresh parent turn can
+      // read it. Watchdog handoffs keep their existing coalescing semantics.
+      const childCompletionDelivery = childCompletionDecisionId
+        ? { nativeChildCompletionDecisionId: childCompletionDecisionId }
+        : {};
       for (const dependent of dependents) {
         const isCompletedChildParent = parent?.id === dependent.id;
         const idempotencyKey = isCompletedChildParent
-          ? `issue_children_completed:${dependent.id}:${input.issueId}`
+          ? `issue_children_completed:${dependent.id}:${input.issueId}${childCompletionRevision}`
           : buildIssueBlockersResolvedWakeIdempotencyKey({
               dependentIssueId: dependent.id,
               resolvedBlockerIssueId: input.issueId,
@@ -1997,6 +2038,7 @@ export async function commitNativeStatusDecision(input: {
           isCompletedChildParent && parent
             ? {
                 completedChildIssueId: input.issueId,
+                ...childCompletionDelivery,
                 childIssueIds: parent.childIssueIds,
                 childIssueSummaries: parent.childIssueSummaries,
                 onboardingCompletion: parent.onboardingCompletion,
@@ -2039,9 +2081,10 @@ export async function commitNativeStatusDecision(input: {
           issueId: parent.id,
           agentId: parent.assigneeAgentId,
           reason: "issue_children_completed",
-          idempotencyKey: `issue_children_completed:${parent.id}:${input.issueId}`,
+          idempotencyKey: `issue_children_completed:${parent.id}:${input.issueId}${childCompletionRevision}`,
           payload: {
             completedChildIssueId: input.issueId,
+            ...childCompletionDelivery,
             childIssueIds: parent.childIssueIds,
             childIssueSummaries: parent.childIssueSummaries,
             onboardingCompletion: parent.onboardingCompletion,
@@ -2049,6 +2092,7 @@ export async function commitNativeStatusDecision(input: {
           },
           contextSnapshot: {
             completedChildIssueId: input.issueId,
+            ...childCompletionDelivery,
             childIssueIds: parent.childIssueIds,
             childIssueSummaries: parent.childIssueSummaries,
             onboardingCompletion: parent.onboardingCompletion,
@@ -2062,6 +2106,7 @@ export async function commitNativeStatusDecision(input: {
           payload: {
             parentIssueId: parent.id,
             completedChildIssueId: input.issueId,
+            ...childCompletionDelivery,
             childIssueSummaries: parent.childIssueSummaries,
             onboardingCompletion: parent.onboardingCompletion,
             childIssueSummaryTruncated: parent.childIssueSummaryTruncated,

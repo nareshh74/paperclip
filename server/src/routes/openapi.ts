@@ -11,6 +11,7 @@ import {
   aiConnectionLoginIntentSchema,
   localAiConnectionSchema,
   localAiLoginStartSchema,
+  browserCodeSchema,
   emailEndpointSetupSchema,
   emailConnectionSchema,
   emailAddressCheckSchema,
@@ -22,6 +23,7 @@ import {
   slackToolCallSchema,
   slackSearchConfigSchema,
   // Agent
+  submitAgentCommentarySchema,
   AGENT_PALETTE_IDS,
   AGENT_AVATAR_SIZES,
   CHARACTER_STATES,
@@ -266,6 +268,7 @@ import {
   revokeToolTrustRuleSchema,
   unbindToolProfileBindingSchema,
   importMcpJsonSchema,
+  mcpConsentSchema,
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
   completeConnectionIntentSchema,
@@ -1262,6 +1265,7 @@ function registerCurrentRoute(input: {
 type OpenApiAuthLevel =
   | "public"
   | "agent_run"
+  | "agent_heartbeat"
   | "runtime_tools"
   | "authenticated"
   | "board"
@@ -1349,6 +1353,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/ai-connections/local",
   "POST /api/companies/{companyId}/ai-connections/local/attempts",
   "POST /api/companies/{companyId}/ai-connections/local/check",
+  "POST /api/companies/{companyId}/ai-connections/local/attempts/{sessionId}/code",
   "DELETE /api/companies/{companyId}/ai-connections/local/attempts/{sessionId}",
   "PUT /api/companies/{companyId}/ai-connections/default",
   "GET /api/companies/{companyId}/ai-connections/{connectionId}/active-runs",
@@ -1680,7 +1685,10 @@ function resolveOperationAuthLevel(
   path: string,
 ): OpenApiAuthLevel {
   const key = operationKey(method, path);
+  if (key === "GET /api/mcp/requests/{id}" || key === "GET /api/mcp/device") return "public";
+  if (path === "/api/mcp/setup" || path === "/api/mcp/device/consent" || path.startsWith("/api/mcp/requests/") || path.startsWith("/api/mcp/connections")) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (key === "POST /api/companies/{companyId}/agent-commentary") return "agent_heartbeat";
   if (key === "POST /api/mcp/project-tools" || key === "POST /api/companies/{companyId}/slack/tasks/{issueId}/tools") return "agent_run";
   if (RUNTIME_TOOLS_OPERATIONS.has(key)) return "runtime_tools";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
@@ -1752,6 +1760,8 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "agent_run") {
         operation.security = [securityRequirement(AGENT_RUN_AUTH_SCHEME)];
+      } else if (authLevel === "agent_heartbeat") {
+        operation.security = [securityRequirement(AGENT_BEARER_AUTH_SCHEME)];
       } else if (authLevel === "runtime_tools") {
         operation.security = RUNTIME_TOOLS_SECURITY;
       } else if (authLevel === "authenticated") {
@@ -1767,6 +1777,8 @@ function applyDocumentFixups(document: any): any {
             ? { actor: "board" }
             : authLevel === "agent_run"
               ? { actor: "agent", heartbeatBound: true, taskBound: true }
+            : authLevel === "agent_heartbeat"
+              ? { actor: "agent", heartbeatBound: true }
             : authLevel === "runtime_tools"
               ? { actor: "runtime_tools", heartbeatBound: true }
               : authLevel === "authenticated"
@@ -3449,6 +3461,25 @@ registry.registerPath({
   summary: "Get an agent",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/identity",
+  tags: ["agents"],
+  summary: "Get an agent's public cryptographic identity, or null before provisioning",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: r.ok(z.object({
+      algorithm: z.literal("Ed25519"),
+      keyId: z.string(),
+      publicKeyPem: z.string(),
+      createdAt: z.string().datetime(),
+    }).nullable()),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
 });
 
 registry.registerPath({
@@ -5262,6 +5293,33 @@ registry.registerPath({
     body: jsonBody(addApprovalCommentSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+// ─── Agent feedback ──────────────────────────────────────────────────────────
+
+const agentCommentaryAcknowledgementSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(["complaint", "suggestion"]),
+  createdAt: z.string().datetime(),
+  replayed: z.boolean(),
+}).strict();
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/agent-commentary",
+  tags: ["agents"],
+  summary: "Submit internally attributed agent feedback",
+  description: "Requires an active legacy agent run: a run-bound agent JWT, or an agent API key with X-Paperclip-Run-Id. Attribution is derived from authority; ownership fields are rejected. Equivalent replay returns the existing acknowledgement. Native runs use their bound feedback tools. Failure must not interrupt the primary task or trigger retries.",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(submitAgentCommentarySchema),
+  },
+  responses: {
+    200: r.ok(agentCommentaryAcknowledgementSchema),
+    201: { ...r.ok(agentCommentaryAcknowledgementSchema), description: "Feedback stored" },
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict,
+    503: { description: "Feedback storage unavailable; continue the primary task without retrying" },
+  },
 });
 
 // ─── Costs ───────────────────────────────────────────────────────────────────
@@ -11414,6 +11472,49 @@ registerCurrentRoute({
 });
 
 registerCurrentRoute({
+  method: "get", path: "/api/mcp/setup", tags: ["tool-gateway"],
+  summary: "Read assistant connection setup using a human browser session",
+  // Available while disabled; returns metadata only and never grants access.
+  responses: {
+    200: r.ok(z.object({ enabled: z.boolean(), serverUrl: z.string().url(), invitationUrl: z.string().url(), invitation: z.string() })),
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/requests/{id}", tags: ["tool-gateway"],
+  summary: "Describe an assistant connection request and available sign-in options",
+  responses: { 200: r.ok(), 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/mcp/requests/{id}/consent", tags: ["tool-gateway"],
+  summary: "Approve or deny assistant access using a same-origin browser session",
+  body: mcpConsentSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/device", tags: ["tool-gateway"],
+  summary: "Describe a device approval request without revealing unauthenticated organization data",
+  responses: { 200: r.ok(), 400: r.badRequest, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/mcp/device/consent", tags: ["tool-gateway"],
+  summary: "Approve or deny a device request using a same-origin human browser session",
+  body: mcpConsentSchema.extend({ userCode: z.string().min(8).max(12) }),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/connections", tags: ["tool-gateway"],
+  summary: "List the signed-in person's assistant connections",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+registerCurrentRoute({
+  method: "delete", path: "/api/mcp/connections/{id}", tags: ["tool-gateway"],
+  summary: "Revoke an assistant connection using a same-origin browser session",
+  responses: { 204: { description: "Connection revoked" }, 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
   method: "get",
   path: "/api/tool-gateway/gateways/{gatewayId}/mcp",
   tags: ["tool-gateway"],
@@ -11648,7 +11749,7 @@ registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/ai-connections/local",
   tags: ["ai-connections"],
-  summary: "Verify and save the local operator's CLI subscription account",
+  summary: "Verify and save an owned local subscription sign-in",
   body: localAiConnectionSchema,
   responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable },
 });
@@ -11668,8 +11769,16 @@ registerCurrentRoute({
 registerCurrentRoute({
   method: "post",
   path: "/api/companies/{companyId}/ai-connections/local/check",
-  tags: ["ai-connections"], summary: "Check the local operator's subscription sign-in without saving a connection",
+  tags: ["ai-connections"], summary: "Check an owned local subscription sign-in without saving a connection",
   body: localAiConnectionSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/ai-connections/local/attempts/{sessionId}/code",
+  tags: ["ai-connections"], summary: "Submit the browser code for an owned local Claude sign-in",
+  body: z.object({ browserCode: browserCodeSchema }),
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
 });
 
