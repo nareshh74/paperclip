@@ -106,6 +106,7 @@ export const companiesApi = {
         | "description"
         | "status"
         | "budgetMonthlyCents"
+        | "runLimits"
         | "requireBoardApprovalForNewAgents"
         | "interactionResolverGovernance"
         | "feedbackDataSharingEnabled"

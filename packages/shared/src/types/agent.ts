@@ -91,6 +91,7 @@ export interface Agent {
   avatarUrl?: string;
   status: AgentStatus;
   reportsTo: string | null;
+  teamId?: string | null;
   capabilities: string | null;
   adapterType: AgentAdapterType;
   adapterConfig: Record<string, unknown>;

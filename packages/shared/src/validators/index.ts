@@ -277,6 +277,13 @@ export {
   type EnsureMySkillFolder,
 } from "./folder.js";
 export {
+  runLimitsSchema,
+  createTeamSchema,
+  updateTeamSchema,
+  type CreateTeam,
+  type UpdateTeam,
+} from "./team.js";
+export {
   catalogTeamKindSchema,
   catalogTeamTrustLevelSchema,
   catalogTeamCompatibilitySchema,

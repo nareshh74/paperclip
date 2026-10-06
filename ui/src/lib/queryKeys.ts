@@ -214,6 +214,9 @@ export const queryKeys = {
     installed: (companyId: string) =>
       ["team-catalog", "installed", companyId] as const,
   },
+  teams: {
+    list: (companyId: string) => ["teams", companyId] as const,
+  },
   agents: {
     list: (companyId: string) => ["agents", companyId] as const,
     detail: (id: string) => ["agents", "detail", id] as const,

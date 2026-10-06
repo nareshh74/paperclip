@@ -12,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { environments } from "./environments.js";
+import { teams } from "./teams.js";
 
 export const agents = pgTable(
   "agents",
@@ -25,6 +26,7 @@ export const agents = pgTable(
     appearance: jsonb("appearance").$type<AgentAppearance>(),
     status: text("status").notNull().default("idle"),
     reportsTo: uuid("reports_to").references((): AnyPgColumn => agents.id),
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "set null" }),
     capabilities: text("capabilities"),
     adapterType: text("adapter_type").notNull().default("process"),
     adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
@@ -44,6 +46,7 @@ export const agents = pgTable(
   (table) => ({
     companyIdUq: unique("agents_company_id_uq").on(table.companyId, table.id),
     companyStatusIdx: index("agents_company_status_idx").on(table.companyId, table.status),
+    companyTeamIdx: index("agents_company_team_idx").on(table.companyId, table.teamId),
     companyReportsToIdx: index("agents_company_reports_to_idx").on(table.companyId, table.reportsTo),
     companyDefaultEnvironmentIdx: index("agents_company_default_environment_idx").on(table.companyId, table.defaultEnvironmentId),
   }),

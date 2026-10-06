@@ -29,6 +29,7 @@ import {
   ToggleField,
 } from "../components/agent-config-primitives";
 import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
+import { RunLimitsSettings } from "../components/RunLimitsSettings";
 
 export function CompanySettings() {
   const {
@@ -353,6 +354,8 @@ export function CompanySettings() {
           />
         </div>
       </div>
+
+      <RunLimitsSettings company={selectedCompany} />
 
       {/* Interaction governance */}
       <InteractionGovernancePanel

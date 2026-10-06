@@ -902,6 +902,27 @@ export function IssueProperties({
               ))}
             </div>
           </div>
+          {([
+            ["maxOutputTokensPerRun", "Max output tokens per run"],
+            ["timeoutSec", "Time limit per run (sec)"],
+          ] as const).map(([key, label]) => (
+            <div key={key} className="space-y-1.5">
+              <div className="text-xs text-muted-foreground">{label}</div>
+              <input
+                type="number"
+                min={1}
+                className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-xs outline-none"
+                placeholder="Inherit"
+                defaultValue={typeof assigneeOverrideAdapterConfig[key] === "number" ? String(assigneeOverrideAdapterConfig[key]) : ""}
+                data-testid={`issue-run-limit-${key}`}
+                onBlur={(event) => {
+                  const n = Number(event.target.value);
+                  const next = event.target.value.trim() && Number.isInteger(n) && n > 0 ? n : undefined;
+                  if (next !== assigneeOverrideAdapterConfig[key]) updateAssigneeOverrideConfig({ [key]: next });
+                }}
+              />
+            </div>
+          ))}
           {assigneeAdapterType === "claude_local" ? (
             <div className="flex items-center justify-between rounded-md border border-border px-2 py-1.5">
               <div className="text-xs text-muted-foreground">Enable Chrome (--chrome)</div>

@@ -22,6 +22,7 @@ import type {
 import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS, supportedEnvironmentDriversForAdapter, isValidBrowserCode, ADAPTER_AUTH_MISSING_CHECK_CODE } from "@paperclipai/shared";
 import type { AdapterModel } from "../api/agents";
 import { agentsApi } from "../api/agents";
+import { teamsApi } from "../api/teams";
 import { ApiError } from "../api/client";
 import { environmentsApi } from "../api/environments";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -937,6 +938,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     enabled: Boolean(!isCreate && selectedCompanyId),
   });
 
+  const { data: companyTeams = [] } = useQuery({
+    queryKey: selectedCompanyId ? queryKeys.teams.list(selectedCompanyId) : ["teams", "none"],
+    queryFn: () => teamsApi.list(selectedCompanyId!),
+    enabled: Boolean(!isCreate && selectedCompanyId),
+  });
+
   /** Props passed to adapter-specific config field components */
   const adapterFieldProps = {
     mode,
@@ -1478,6 +1485,35 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 onChange={(id) => mark("identity", "reportsTo", id)}
                 excludeAgentIds={[props.agent.id]}
                 chooseLabel="Choose manager…"
+              />
+            </Field>
+            {(companyTeams.length > 0 || props.agent.teamId) && (
+            <Field label="Team" hint="Team default model and output-token cap apply when this agent does not set its own.">
+              <select
+                className={inputClass}
+                value={eff("identity", "teamId", props.agent.teamId ?? "") ?? ""}
+                onChange={(event) => mark("identity", "teamId", event.target.value || null)}
+                data-testid="agent-config-team"
+              >
+                <option value="">No team</option>
+                {companyTeams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            )}
+            <Field label="Max output tokens per run" hint="Stops a run mid-way when it goes over this. Empty inherits the team or company cap.">
+              <DraftInput
+                value={eff("adapterConfig", "maxOutputTokensPerRun", config.maxOutputTokensPerRun == null ? "" : String(config.maxOutputTokensPerRun))}
+                onCommit={(v) => {
+                  const n = Number(v);
+                  mark("adapterConfig", "maxOutputTokensPerRun", v.trim() && Number.isInteger(n) && n > 0 ? n : undefined);
+                }}
+                immediate
+                className={inputClass}
+                placeholder="Inherit"
               />
             </Field>
             {isLocal && !props.hidePromptTemplate && (

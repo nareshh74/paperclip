@@ -2628,6 +2628,15 @@ export type {
   MoveFolderItemRequest,
   EnsureMySkillFolderRequest,
 } from "./types/folder.js";
+export type { Team, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./types/team.js";
+export { RUN_LIMIT_KEYS } from "./types/team.js";
+export {
+  runLimitsSchema,
+  createTeamSchema,
+  updateTeamSchema,
+  type CreateTeam,
+  type UpdateTeam,
+} from "./validators/team.js";
 
 export {
   adapterRegistryEntrySchema,

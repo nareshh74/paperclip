@@ -1,4 +1,12 @@
 import { externalObjectService } from "./external-objects.js";
+import {
+  OUTPUT_TOKEN_CAP_ERROR_CODE,
+  RUN_TIME_LIMIT_ERROR_CODE,
+  type RunLimitStopKind,
+  buildRunLimitStopComment,
+  createOutputTokenMeter,
+  resolveEffectiveRunLimits,
+} from "./run-limits.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
 import { AgentDirectoryReuseInvalidatedError, isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
@@ -152,6 +160,7 @@ import {
   companySkillVersions,
   companySkills as companySkillsTable,
   companies,
+  teams,
   completionContracts,
   costEvents,
   documentAnnotationComments,
@@ -20484,6 +20493,7 @@ export function heartbeatService(
     > | null = null;
     let providerTraceFinalized = false;
     let readFailureReportSecrets: () => string[] = () => [];
+    let runTimeLimitTimer: ReturnType<typeof setTimeout> | null = null;
 
     try {
       const agent = await getAgent(run.agentId);
@@ -21621,6 +21631,41 @@ export function heartbeatService(
         // preserving isolated mode and the mandatory sandbox preflight.
         ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
       };
+      const [runLimitCompany, runLimitTeam] = await Promise.all([
+        db
+          .select({ runLimits: companies.runLimits })
+          .from(companies)
+          .where(eq(companies.id, agent.companyId))
+          .then((rows) => rows[0] ?? null),
+        agent.teamId
+          ? db
+              .select({ runLimits: teams.runLimits })
+              .from(teams)
+              .where(and(eq(teams.id, agent.teamId), eq(teams.companyId, agent.companyId)))
+              .then((rows) => rows[0] ?? null)
+          : null,
+      ]);
+      const runLimits = resolveEffectiveRunLimits({
+        task: issueAssigneeOverrides?.adapterConfig,
+        agent: config,
+        team: runLimitTeam?.runLimits,
+        company: runLimitCompany?.runLimits,
+      });
+      // Team and company defaults fill the model only when task and agent leave it unset.
+      if (runLimits.model && (runLimits.sources.model === "team" || runLimits.sources.model === "company")) {
+        Object.assign(mergedConfig, { model: runLimits.model });
+      }
+      // Agent and task timeoutSec keep their existing adapter-kill behavior. Only the
+      // new team and company time limits use the server timer, which posts resume notes.
+      const serverTimeLimitSec =
+        runLimits.timeoutSec && (runLimits.sources.timeoutSec === "team" || runLimits.sources.timeoutSec === "company")
+          ? runLimits.timeoutSec
+          : null;
+      if (serverTimeLimitSec) {
+        // The adapter's wall-clock kill stays as a backstop only, so it must not win the race.
+        // ponytail: fixed 60s margin; make it configurable if adapters need longer to settle.
+        Object.assign(mergedConfig, { timeoutSec: serverTimeLimitSec + 60 });
+      }
       const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
         mergedConfig,
         selectedEnvironmentId,
@@ -23180,6 +23225,65 @@ export function heartbeatService(
       } = { current: null };
       let stdoutExcerpt = "";
       let stderrExcerpt = "";
+      const outputTokenMeter = runLimits.maxOutputTokensPerRun ? createOutputTokenMeter() : null;
+      let runLimitStopTriggered = false;
+      const stopRunAtLimit = async (kind: RunLimitStopKind, observed: number) => {
+        if (runLimitStopTriggered) return;
+        runLimitStopTriggered = true;
+        const isTime = kind === "time";
+        const limit = isTime ? runLimits.timeoutSec : runLimits.maxOutputTokensPerRun;
+        const reason = isTime
+          ? `Run time limit reached (${observed}s of ${limit}s)`
+          : `Output-token cap reached (${observed} of ${limit})`;
+        // The adapter may already be finishing; do not report a stop for a run that ended.
+        const current = await getRun(run.id);
+        if (!current || current.status !== "running") return;
+        try {
+          await appendRunEvent(run, {
+            eventType: isTime ? "run.time_limit_exceeded" : "run.output_token_cap_exceeded",
+            stream: "system",
+            level: "warn",
+            message: reason,
+            payload: { observed, ...runLimits },
+          });
+          if (issueId) {
+            await issuesSvc.addComment(
+              issueId,
+              buildRunLimitStopComment({
+                kind,
+                runId: run.id,
+                agentName: agent.name,
+                observed,
+                limits: runLimits,
+                lastOutputExcerpt: stdoutExcerpt,
+              }),
+              { agentId: agent.id, runId: run.id },
+            );
+          }
+        } finally {
+          // Stopping the run matters more than the notes, so cancel even if they failed.
+          await cancelRunInternal(run.id, reason, {
+            errorCode: isTime ? RUN_TIME_LIMIT_ERROR_CODE : OUTPUT_TOKEN_CAP_ERROR_CODE,
+            resultJson: { runLimitStop: { kind, observed, ...runLimits } },
+            // A limit stop needs a human or a limit change; an automatic retry would hit it again.
+            suppressImmediateRecovery: true,
+          });
+        }
+      };
+      const fireRunLimitStop = (kind: RunLimitStopKind, observed: number) => {
+        // Not awaited: cancellation waits for the adapter, which may be waiting on the caller.
+        void stopRunAtLimit(kind, observed).catch((err) =>
+          logger.error({ err, runId: run.id, kind }, "failed to stop run at run limit"),
+        );
+      };
+      if (serverTimeLimitSec) {
+        const startedAtMs = Date.now();
+        runTimeLimitTimer = setTimeout(
+          () => fireRunLimitStop("time", Math.round((Date.now() - startedAtMs) / 1000)),
+          serverTimeLimitSec * 1000,
+        );
+        runTimeLimitTimer.unref?.();
+      }
       let outputSeq = Number(run.lastOutputSeq ?? 0);
       let lastOutputFlushAt: Date | null = run.lastOutputAt ?? null;
       let lastLogRuntimeStatusTouchMs = 0;
@@ -23314,6 +23418,11 @@ export function heartbeatService(
           );
           if (stream === "stdout")
             stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
+          if (stream === "stdout" && outputTokenMeter && !runLimitStopTriggered) {
+            outputTokenMeter.push(chunk);
+            const outputTokens = outputTokenMeter.total();
+            if (outputTokens > runLimits.maxOutputTokensPerRun!) fireRunLimitStop("output_tokens", outputTokens);
+          }
           if (stream === "stderr")
             stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
           const ts = new Date().toISOString();
@@ -26755,6 +26864,7 @@ export function heartbeatService(
         }
       } finally {
         controllerLease.stop();
+        if (runTimeLimitTimer) clearTimeout(runTimeLimitTimer);
         activeRunExecutions.delete(run.id);
         // A failed owned Stop remains visible until this exact executor settles,
         // including a graceful exit result arriving after the cancellation error.

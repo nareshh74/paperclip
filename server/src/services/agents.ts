@@ -37,6 +37,7 @@ import {
   collectUserSecretRefs,
   syncAgentAdapterEnvBindings,
 } from "./agent-secret-bindings.js";
+import { teamService } from "./teams.js";
 import { logActivity } from "./activity-log.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
 import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
@@ -732,6 +733,7 @@ export function agentService(db: Db) {
       }
       await assertNoCycle(id, data.reportsTo);
     }
+    await teamService(db).assertTeamInCompany(existing.companyId, data.teamId);
 
     if (data.name !== undefined) {
       const previousShortname = normalizeAgentUrlKey(existing.name);
@@ -880,6 +882,7 @@ export function agentService(db: Db) {
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
+      await teamService(db).assertTeamInCompany(companyId, data.teamId);
 
       const existingAgents = await db
         .select({ id: agents.id, name: agents.name, status: agents.status })

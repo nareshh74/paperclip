@@ -240,6 +240,8 @@ export type {
   MoveFolderItemRequest,
   EnsureMySkillFolderRequest,
 } from "./folder.js";
+export type { Team, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./team.js";
+export { RUN_LIMIT_KEYS } from "./team.js";
 export type {
   CatalogTeamKind,
   CatalogTeamTrustLevel,
