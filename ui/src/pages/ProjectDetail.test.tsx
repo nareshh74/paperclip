@@ -85,6 +85,7 @@ vi.mock("@/plugins/launchers", () => ({ PluginLauncherOutlet: () => null }));
 vi.mock("../components/ProjectProperties", () => ({
   ProjectProperties: () => <div data-testid="project-properties"><input aria-label="Unsaved project field" /></div>,
 }));
+vi.mock("../components/ProjectPmHandoff", () => ({ ProjectPmHandoff: () => null }));
 vi.mock("../components/BudgetPolicyCard", () => ({
   BudgetPolicyCard: () => <div data-testid="budget-policy-card" />,
 }));
