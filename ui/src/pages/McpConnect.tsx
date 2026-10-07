@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Paperclip } from "lucide-react";
 import { Link, useParams } from "@/lib/router";
 import type { McpConnection, McpConnectionRequest } from "@paperclipai/shared";
+import { deriveInitials, Identity } from "@/components/Identity";
+import { assistantConnectionDisplayName } from "./apps/connection-owner";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -58,9 +60,11 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
   const assistantName = clientName && !/^(assistant|mcp client)$/i.test(clientName) ? clientName : "your assistant";
   const clientOrigin = data?.clientOrigin || data?.redirectOrigin;
   const company = data?.companies.find((item) => item.id === selectedCompanyId);
-  const allowWrites = Boolean(data?.requestedWrite && company?.canWrite && writeEnabled);
+  const canApproveWrites = Boolean(company?.canWrite && writeEnabled);
+  const allowWrites = Boolean(data?.requestedWrite && canApproveWrites);
+  const allowConfiguration = Boolean(data?.requestedConfigure && canApproveWrites);
   const consent = useMutation({
-    mutationFn: (decision: "approve" | "deny") => api.post<{ redirectUrl?: string; status?: "approved" | "denied" }>(device ? "/mcp/device/consent" : `/mcp/requests/${encodeURIComponent(id)}/consent`, { decision, companyId: selectedCompanyId || undefined, allowWrites: decision === "approve" && allowWrites, ...(device ? { userCode: id } : {}) }),
+    mutationFn: (decision: "approve" | "deny") => api.post<{ redirectUrl?: string; status?: "approved" | "denied" }>(device ? "/mcp/device/consent" : `/mcp/requests/${encodeURIComponent(id)}/consent`, { decision, companyId: selectedCompanyId || undefined, allowWrites: decision === "approve" && allowWrites, allowConfiguration: decision === "approve" && allowConfiguration, ...(device ? { userCode: id } : {}) }),
     onSuccess: ({ redirectUrl, status }) => { if (device && status) setDeviceResult(status); else if (redirectUrl) window.location.assign(redirectUrl); },
   });
   if (deviceResult) return <div className="mx-auto max-w-xl py-10"><Card className="block space-y-4 p-6"><Paperclip className="size-8" /><h1 className="text-xl font-semibold">{deviceResult === "approved" ? "Access approved" : "Connection declined"}</h1><p className="text-sm">{deviceResult === "approved" ? "Return to your assistant. It will finish connecting automatically." : "No access was granted. You can start a new connection from your assistant."}</p><Button variant="outline" asChild><Link to="/">Back to Paperclip</Link></Button></Card></div>;
@@ -95,11 +99,11 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
             {!data.companies.length && <p className="text-sm text-muted-foreground">This account has no available organizations. Ask an organization owner to add you, then reconnect from your assistant.</p>}
           </fieldset>}
           <p className="text-sm">Read all of your Paperclip data</p>
-          {data.requestedWrite && <label htmlFor="mcp-allow-writes" className="flex items-start gap-3 text-sm leading-6">
+          {(data.requestedWrite || data.requestedConfigure) && <label htmlFor="mcp-allow-writes" className="flex items-start gap-3 text-sm leading-6">
             <span className="flex h-6 shrink-0 items-center">
-              <Checkbox id="mcp-allow-writes" checked={allowWrites} disabled={!company?.canWrite || consent.isPending} onCheckedChange={(checked) => setWriteEnabled(checked === true)} />
+              <Checkbox id="mcp-allow-writes" checked={canApproveWrites} disabled={!company?.canWrite || consent.isPending} onCheckedChange={(checked) => setWriteEnabled(checked === true)} />
             </span>
-            <span>Allow write access and creating tasks as me</span>
+            <span>Write all of your Paperclip data</span>
           </label>}
           {company && !company.canWrite && <p className="text-sm text-muted-foreground">Your role in this organization is read-only.</p>}
           {consent.error && <p className="text-sm text-destructive">{consent.error.message}</p>}
@@ -114,19 +118,25 @@ function McpConnectRequest({ id, device = false, onEditCode }: { id: string; dev
 }
 
 export function AssistantConnectionsPage() {
+  const client = useQueryClient();
   const connections = useQuery({ queryKey: ["mcp-connections"], queryFn: () => api.get<McpConnection[]>("/mcp/connections"), retry: false });
-  const revoke = useMutation({ mutationFn: (id: string) => api.delete(`/mcp/connections/${id}`), onSuccess: () => { void connections.refetch(); } });
+  const active = connections.data?.filter(connection => !connection.revokedAt);
+  const revoke = useMutation({ mutationFn: (id: string) => api.delete(`/mcp/connections/${id}`), onSuccess: (_, id) => {
+    client.setQueryData<McpConnection[]>(["mcp-connections"], rows => rows?.filter(row => row.id !== id));
+    return client.invalidateQueries({ queryKey: ["mcp-connections"] });
+  } });
   return <div className="mx-auto max-w-xl space-y-4 py-10">
     <h1 className="text-xl font-semibold">Assistant connections</h1>
     <p className="text-sm text-muted-foreground">Revoking a connection stops its future tool calls. Work already delegated continues under your organization’s normal controls.</p>
     {connections.isPending && <p className="text-sm">Loading connections…</p>}
     {(connections.error || revoke.error) && <p className="text-sm text-destructive">{(connections.error ?? revoke.error)?.message}</p>}
-    {connections.data?.length === 0 && <p className="text-sm">No assistant connections.</p>}
-    {connections.data?.map((connection) => <Card key={connection.id} className="block space-y-2 p-4">
-      <h2 className="font-medium">{connection.clientName}</h2>
+    {active?.length === 0 && <p className="text-sm">No assistant connections.</p>}
+    {active?.map((connection) => <Card key={connection.id} className="block space-y-2 p-4">
+      <h2 className="font-medium"><Identity name={assistantConnectionDisplayName(connection)} avatarUrl={connection.user?.image} initials={deriveInitials(connection.user?.name ?? "You")} /></h2>
       <p className="text-sm text-muted-foreground">Organization: {connection.companyName}</p>
-      <p className="text-sm">{connection.scopes.includes("paperclip:write") ? "Read, create tasks and comment" : "Read only"}</p>
-      {connection.revokedAt ? <p className="text-sm text-muted-foreground">Revoked</p> : <Button variant="outline" disabled={revoke.isPending} onClick={() => revoke.mutate(connection.id)}>Revoke connection</Button>}
+      <p className="text-sm">{connection.scopes.includes("paperclip:write") ? "Read and edit work" : "Read only"}</p>
+      {connection.scopes.includes("paperclip:configure") && <p className="text-sm">Configure agents, projects and skills</p>}
+      <Button variant="outline" disabled={revoke.isPending} onClick={() => revoke.mutate(connection.id)}>Revoke connection</Button>
     </Card>)}
     <Link className="text-sm underline" to="/">Back to Paperclip</Link>
   </div>;
