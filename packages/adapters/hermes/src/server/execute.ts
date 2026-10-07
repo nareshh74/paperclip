@@ -438,7 +438,10 @@ export async function execute(
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) === true; // default false
-  const args: string[] = ["chat", "-q", prompt];
+  // Long prompts overflow the OS command-line limit (32K chars on Windows: spawn ENAMETOOLONG),
+  // so send them on stdin via `--query-file -`. Short prompts keep `-q` for older Hermes builds.
+  const promptViaStdin = prompt.length > 8000;
+  const args: string[] = promptViaStdin ? ["chat", "--query-file", "-"] : ["chat", "-q", prompt];
   if (useQuiet) args.push("-Q");
 
   if (model) {
@@ -563,6 +566,7 @@ export async function execute(
     env,
     timeoutSec,
     graceSec,
+    ...(promptViaStdin ? { stdin: prompt } : {}),
     onLog: wrappedOnLog,
     onSpawn: ctx.onSpawn,
   });
