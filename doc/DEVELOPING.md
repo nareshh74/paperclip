@@ -103,6 +103,11 @@ pnpm build-storybook
 
 These run the `@paperclipai/ui` Storybook on port `6006` and build the static output to `ui/storybook-static/`.
 
+**HTML artifacts** covers secure rendered/raw attachment previews, interactive
+reports, security probes, workspace previews, and opening a report from a task.
+See [HTML artifact previews](html-artifact-previews.md) for the security boundary,
+supported content, and browser verification command.
+
 **Composer → New task** includes agent/user/project/task mentions, skill and
 routine slash commands, and populated rich chips on desktop and mobile. Agent
 mentions use the same avatars in suggestions, inserted chips, and the mocked
@@ -749,6 +754,36 @@ PAPERCLIP_HOME=/custom/path PAPERCLIP_INSTANCE_ID=dev pnpm paperclipai run
 
 No Docker or external database is required for this mode.
 
+## Issue Privacy Rollout
+
+`PAPERCLIP_ISSUE_PRIVACY_MODE` controls the canonical opt-in issue/project privacy predicate:
+
+- `enforce` (default): return private issues only to implicit principals, issue grantees, or private-project access members; hide private projects from non-members
+- `shadow`: log structured would-deny decisions but preserve existing reads; use only for rollout diagnosis
+- `off`: skip the predicate and shadow logging
+
+Grant checks read current database state; there is no positive privacy cache.
+Sharing a task grants access to that task and its private descendants. Parents
+and siblings need separate grants. An agent's access is intersected with its
+run's responsible user's current access.
+
+`enforce` is the production default. `shadow` and `off` disclose private data and
+are only temporary diagnostic overrides. The old branch's historical sign-off
+does not qualify the current runtime. See [ISSUE-PRIVACY.md](./ISSUE-PRIVACY.md)
+for the model, validation coverage, break-glass behavior, and residual risks.
+
+Issue-bound heartbeat runs inherit the same read predicate through the stored
+`heartbeat_runs.scope_kind = 'issue'` and `issue_id` binding. Issue deletion
+nulls the foreign key but preserves the explicit issue scope as a fail-closed
+tombstone. Workspace-operation history is either deleted with its direct issue
+or run binding, or remains bound to that fail-closed run tombstone, so it cannot
+become company-level maintenance data through foreign-key nulling. In enforce mode, direct run detail, transcript,
+event, log, and workspace-operation reads return `404` to non-members. Company
+run-history and live-run lists retain a metadata-only row with timing, status,
+token usage, and cost for budget oversight; issue identifiers, summaries, and
+run content are omitted. Runs without an issue binding keep company-level
+maintenance-run visibility.
+
 ## Storage in Dev (Auto-Handled)
 
 For local development, the default storage provider is `local_disk`, which persists uploaded images/attachments at:
@@ -823,7 +858,7 @@ If a repository is detached or its source configuration changes, its previous ta
 
 ## Config Freshness
 
-Agent, project, environment, secret, skill, and workspace config edits are sampled at the next run boundary. A heartbeat that is already running finishes with the config it started with.
+Agent, project, environment, secret, skill, and workspace config edits are sampled at the next run boundary. A heartbeat that is already running finishes with the config it started with. Native runners project explicitly configured task environment variables into provider processes and tool commands, including custom `PAPERCLIP_*` names such as `PAPERCLIP_PAGE_BUCKET`. Adding, changing, or removing a projected variable replaces a retained provider process at the next run boundary. Unchanged variables permit process reuse. The projection contains names only; secret values stay in the child environment. Ambient host secrets are not projected. Native projections allow up to 128 variable names, 64 KiB per entry, and 256 KiB of values in total. These native launch limits do not apply to legacy adapter configuration. Runtime authority, provider login credentials, and process-loader settings use their existing restricted paths.
 
 When effective run config changes, Paperclip may intentionally skip a saved adapter session, refresh persisted workspace runtime config, replace a reused execution workspace, or avoid reusing a sandbox/environment lease. Fresh execution can lose adapter-specific session, workspace, or sandbox state; correctness of the next run's config takes priority over continuity. Plain environment values affect freshness through value hashes; run result JSON and workspace operation logs expose only the non-sensitive freshness decision categories, without storing secret values, full env maps, provider credentials, or private path details.
 

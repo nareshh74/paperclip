@@ -1,3 +1,4 @@
+import { assertCanManageIssueMonitor, prepareIssueMonitorUpdate, setTaskMonitorSchema, summarizeIssueMonitor } from "../issue-monitors.js";
 import { readTaskQuestionContext } from "../issue-question-context.js";
 import { isConversation } from "../agent-conversations.js";
 import { setIssueTitle } from "../issue-title.js";
@@ -12,9 +13,9 @@ import { agentCommentaryToolInputSchema } from "@paperclipai/shared";
 import { submitAgentCommentary } from "../agent-commentary.js";
 import type { createAssignedMcpTools } from "./assigned-mcp-tools.js";
 import { assertAssignableAgent } from "../agent-assignability.js";
-import { authorizationService } from "../authorization.js";
+import { approvalReadSqlCondition, canActorReadApproval, authorizationService, issueReadSqlCondition, type AuthorizationActor } from "../authorization.js";
 import { resolveCoreTrustPreset } from "../trust-preset-resolver.js";
-import { normalizeIssueExecutionPolicy } from "../issue-execution-policy.js";
+import { normalizeIssueExecutionPolicy, redactIssueMonitorExternalRef } from "../issue-execution-policy.js";
 import { buildLowTrustSourceTrust } from "../source-trust.js";
 import { handoffPlanContext } from "./handoff-plan-context.js";
 import { callCreateSkillTool, callUpdateSkillTool } from "../skill-tools.js";
@@ -101,7 +102,7 @@ const IMPLEMENTED_OPERATIONS = new Set([
   "submit_complaint", "submit_suggestion",
   "read_agent_instructions", "update_agent_instructions", "get_agent_instruction_history", "restore_agent_instructions",
   "search_api", "call_api", "hire_agent",
-  "get_task_context", "get_task_history", "search_tasks", "report_progress", "set_task_title",
+  "get_task_context", "get_task_history", "search_tasks", "report_progress", "set_task_title", "set_task_monitor",
   "request_human_input",
   "create_skill", "update_skill", "create_task", "reassign_task", "set_dependencies", "create_project", "list_project_repositories", "list_projects", "register_deliverable",
   "list_documents", "read_document", "list_document_revisions", "write_document",
@@ -482,6 +483,7 @@ export class PaperclipRunnerToolAuthority {
             eq(issues.companyId, this.binding.companyId),
             eq(issues.parentId, this.binding.issueId),
             isNull(issues.hiddenAt),
+            await issueReadSqlCondition(this.db, this.#privacyActor(context.run)),
           ))
           .orderBy(desc(issues.createdAt), desc(issues.id))
           .limit(101);
@@ -502,8 +504,8 @@ export class PaperclipRunnerToolAuthority {
           },
           connectionGuidance: CONNECTION_INTENT_AGENT_GUIDANCE,
           acceptedPlan: await this.#acceptedPlan(context.run.contextSnapshot),
-          sourcePlanApproval: await handoffPlanContext(this.db, context.issue),
-          childReviewOutcomes: await childReviewOutcomes(this.db, this.binding.companyId, this.binding.issueId),
+          sourcePlanApproval: await handoffPlanContext(this.db, context.issue, this.#privacyActor(context.run)),
+          childReviewOutcomes: await childReviewOutcomes(this.db, this.binding.companyId, this.binding.issueId, this.#privacyActor(context.run)),
           ...(this.binding.nativeReview ? {
             assignedReview: (await getNativeReviewAssignment(this.db, {
               ...this.binding, contextSnapshot: this.binding.nativeReview,
@@ -531,7 +533,7 @@ export class PaperclipRunnerToolAuthority {
         return { comments: comments.reverse() };
       }
       case "search_tasks": {
-        const tasks = await issueService(this.db).list(this.binding.companyId);
+        const tasks = await issueService(this.db).list(this.binding.companyId, { readCondition: await issueReadSqlCondition(this.db, this.#privacyActor(context.run)) });
         const query = typeof input.query === "string" ? input.query.toLowerCase() : "";
         const statuses = Array.isArray(input.statuses) ? new Set(input.statuses.filter((value): value is string => typeof value === "string")) : null;
         return { tasks: tasks.filter((task) =>
@@ -557,7 +559,7 @@ export class PaperclipRunnerToolAuthority {
         return { actor: redactedActor(actor) };
       }
       case "list_approvals":
-        return { approvals: await approvalService(this.db).list(this.binding.companyId) };
+        return { approvals: await approvalService(this.db).list(this.binding.companyId, undefined, await approvalReadSqlCondition(this.db, this.#privacyActor(context.run))) };
       case "get_approval": {
         const approval = await this.#approval(requiredString(input.approvalId));
         return { approval };
@@ -570,6 +572,7 @@ export class PaperclipRunnerToolAuthority {
             eq(issueApprovals.approvalId, approval.id),
             eq(issueApprovals.companyId, this.binding.companyId),
             eq(issues.companyId, this.binding.companyId),
+            await issueReadSqlCondition(this.db, this.#privacyActor(context.run)),
           ));
         return { approval, tasks: tasks.map((row) => row.issue) };
       }
@@ -580,6 +583,7 @@ export class PaperclipRunnerToolAuthority {
         (await captureRunIdentity(this.db, this.binding)).context?.id ?? null);
       case "reassign_task": return this.#reassignTask(input);
       case "set_task_title": return this.#setTaskTitle(input);
+      case "set_task_monitor": return this.#setTaskMonitor(input);
       case "set_dependencies": return this.#setDependencies(input);
       case "register_deliverable": return this.#registerDeliverable(input);
       default: throw new Error("paperclip_runner_tool_not_bound");
@@ -783,7 +787,14 @@ export class PaperclipRunnerToolAuthority {
   async #approval(id: string) {
     const approval = await approvalService(this.db).getById(id);
     if (!approval || approval.companyId !== this.binding.companyId) throw new Error("paperclip_runner_approval_not_found");
+    const context = await this.#boundContext();
+    if (!(await canActorReadApproval(this.db, this.#privacyActor(context.run), id))) throw new Error("paperclip_runner_approval_not_found");
     return approval;
+  }
+
+  #privacyActor(run: { responsibleUserId: string | null }): AuthorizationActor {
+    return { type: "agent", agentId: this.binding.agentId, companyId: this.binding.companyId,
+      runId: this.binding.runId, source: "agent_jwt", onBehalfOfUserId: run.responsibleUserId };
   }
 
   async #boundContext() {
@@ -826,6 +837,9 @@ export class PaperclipRunnerToolAuthority {
         throw forbidden("The assigned review is no longer available to this run.");
       }
     }
+    const privacy = await authorizationService(this.db).decide({ actor: this.#privacyActor(row.run), action: "issue:read",
+      resource: { type: "issue", companyId: this.binding.companyId, issueId: row.issue.id } });
+    if (!privacy.allowed) throw forbidden("The task is no longer available to this run");
     return row;
   }
 
@@ -1335,6 +1349,84 @@ export class PaperclipRunnerToolAuthority {
     }).syncIssueSafely;
     await syncExternalObjects(this.binding.issueId);
     return result;
+  }
+
+  async #setTaskMonitor(value: Record<string, unknown>): Promise<unknown> {
+    const input = setTaskMonitorSchema.parse(value);
+    if (input.monitor?.externalRef) input.monitor.externalRef = redactIssueMonitorExternalRef(input.monitor.externalRef);
+    const targetId = input.taskId ?? this.binding.issueId;
+    let publication: Parameters<typeof publishActivity>[0] | null = null;
+    let replayed = false;
+    let replayStatus: string | null = null;
+    let replayMonitor: ReturnType<typeof summarizeIssueMonitor> | null = null;
+    const authorizeTarget = async (tx: Db, context: { run: typeof heartbeatRuns.$inferSelect }) => {
+      // A second owned task may itself be writing another task: fail on lock
+      // contention instead of taking opposite issue/run locks and deadlocking.
+      const [target] = await tx.select().from(issues).where(and(
+        eq(issues.id, targetId), eq(issues.companyId, this.binding.companyId),
+      )).for("update", { noWait: true });
+      if (!target) throw notFound("Task not found");
+      const actor = this.#privacyActor(context.run);
+      const access = authorizationService(tx);
+      for (const action of ["issue:read", "issue:mutate"] as const) {
+        const decision = await access.decide({ actor, action, resource: {
+          type: "issue", companyId: this.binding.companyId, issueId: target.id,
+          status: target.status, assigneeAgentId: target.assigneeAgentId, assigneeUserId: target.assigneeUserId,
+        } });
+        if (!decision.allowed) throw forbidden(decision.explanation);
+      }
+      await assertCanManageIssueMonitor(access, { actor }, target.companyId, target.assigneeAgentId, true);
+      if (target.assigneeAgentId !== this.binding.agentId || target.assigneeUserId ||
+          !["in_progress", "in_review"].includes(target.status)) {
+        throw forbidden("Monitors require an in-progress or in-review task assigned to this agent");
+      }
+      return { target, actor };
+    };
+    const result = await this.#withMutationReceipt("set_task_monitor", input.idempotencyKey, input, async (tx, context) => {
+      const { target, actor } = await authorizeTarget(tx, context);
+      // The task lock also serializes retries after a new run resumes the task.
+      // Keep the durable receipt in the existing run ledger, without a new table.
+      const [earlier] = await tx.select({
+        receipt: sql<ToolReceipt>`${heartbeatRuns.resultJson}->'semanticToolReceipts'->${input.idempotencyKey}`,
+      }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, this.binding.companyId),
+        eq(heartbeatRuns.agentId, this.binding.agentId),
+        eq(heartbeatRuns.nativeIssueId, this.binding.issueId),
+        sql`${heartbeatRuns.resultJson}->'semanticToolReceipts' ? ${input.idempotencyKey}`,
+      )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
+      if (earlier?.receipt) {
+        if (earlier.receipt.operationId !== "set_task_monitor" || canonicalJson(earlier.receipt.input) !== canonicalJson(input)) {
+          throw new Error("paperclip_runner_tool_idempotency_conflict");
+        }
+        replayed = true;
+        replayStatus = target.status;
+        replayMonitor = summarizeIssueMonitor(target, normalizeIssueExecutionPolicy(target.executionPolicy));
+        return { taskId: target.id, status: target.status, monitor: replayMonitor };
+      }
+      const patch = prepareIssueMonitorUpdate(target, input.monitor, actor);
+      const [updated] = await tx.update(issues).set({ ...patch, updatedAt: new Date() })
+        .where(and(eq(issues.id, target.id), eq(issues.companyId, this.binding.companyId))).returning();
+      if (!updated) throw notFound("Task not found");
+      const monitor = summarizeIssueMonitor(updated, normalizeIssueExecutionPolicy(updated.executionPolicy));
+      const activity = await persistActivity(tx, {
+        companyId: this.binding.companyId, actorType: "agent", actorId: this.binding.agentId,
+        agentId: this.binding.agentId, runId: this.binding.runId,
+        action: input.monitor ? "issue.monitor_scheduled" : "issue.monitor_cleared",
+        entityType: "issue", entityId: target.id,
+        details: { identifier: target.identifier, nextCheckAt: monitor.nextCheckAt,
+          notes: monitor.notes, scheduledBy: monitor.scheduledBy, serviceName: monitor.serviceName,
+          timeoutAt: monitor.timeoutAt, maxAttempts: monitor.maxAttempts, recoveryPolicy: monitor.recoveryPolicy },
+      });
+      publication = activity.publication;
+      return { taskId: updated.id, status: updated.status, monitor };
+    }, { beforeReceiptReplay: async (tx, context) => {
+      const { target } = await authorizeTarget(tx, context);
+      replayed = true;
+      replayStatus = target.status;
+      replayMonitor = summarizeIssueMonitor(target, normalizeIssueExecutionPolicy(target.executionPolicy));
+    } });
+    if (publication) publishActivity(publication);
+    return { ...record(result), ...(replayed ? { status: replayStatus, monitor: replayMonitor } : {}), replayed };
   }
 
   async #setDependencies(input: Record<string, unknown>): Promise<unknown> {
@@ -2025,6 +2117,9 @@ function redactedTask(task: typeof issues.$inferSelect) {
     workMode: task.workMode,
     assigneeAgentId: task.assigneeAgentId,
     executionRunId: task.executionRunId,
+    ...(task.monitorNextCheckAt || task.monitorLastTriggeredAt ? {
+      monitor: summarizeIssueMonitor(task, normalizeIssueExecutionPolicy(task.executionPolicy)),
+    } : {}),
     parentId: task.parentId,
     projectId: task.projectId,
     goalId: task.goalId,
