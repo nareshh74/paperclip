@@ -47,15 +47,16 @@ export function teamService(db: Db) {
     companyId: string,
     teamId: string,
     managerAgentId: string | null,
+    executor: Pick<Db, "select" | "update"> = db,
   ): Promise<ReportsToChange[]> {
     if (!managerAgentId) return [];
-    const members = await db
+    const members = await executor
       .select({ id: agents.id, reportsTo: agents.reportsTo })
       .from(agents)
       .where(and(eq(agents.companyId, companyId), eq(agents.teamId, teamId), ne(agents.id, managerAgentId)));
     const changed = members.filter((m) => m.reportsTo !== managerAgentId);
     if (changed.length === 0) return [];
-    await db
+    await executor
       .update(agents)
       .set({ reportsTo: managerAgentId, updatedAt: new Date() })
       .where(and(eq(agents.companyId, companyId), inArray(agents.id, changed.map((m) => m.id))));
@@ -112,15 +113,18 @@ export function teamService(db: Db) {
       await getById(companyId, teamId);
       if (data.managerAgentId) await assertAgentInCompany(companyId, data.managerAgentId, "Team manager");
       try {
-        const [row] = await db
-          .update(teams)
-          .set({ ...data, updatedAt: new Date() })
-          .where(and(eq(teams.companyId, companyId), eq(teams.id, teamId)))
-          .returning();
-        const reportsToChanges = data.managerAgentId
-          ? await syncMembersToManager(companyId, teamId, data.managerAgentId)
-          : [];
-        return { ...row!, reportsToChanges };
+        // One transaction: a new manager and the members' reporting line change together.
+        return await db.transaction(async (tx) => {
+          const [row] = await tx
+            .update(teams)
+            .set({ ...data, updatedAt: new Date() })
+            .where(and(eq(teams.companyId, companyId), eq(teams.id, teamId)))
+            .returning();
+          const reportsToChanges = data.managerAgentId
+            ? await syncMembersToManager(companyId, teamId, data.managerAgentId, tx)
+            : [];
+          return { ...row!, reportsToChanges };
+        });
       } catch (error) {
         if (isUniqueViolation(error)) throw conflict("A team with this name already exists");
         throw error;

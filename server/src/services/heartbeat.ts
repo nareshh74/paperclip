@@ -23227,21 +23227,39 @@ export function heartbeatService(
       let stdoutExcerpt = "";
       let stderrExcerpt = "";
       let runLimitStopTriggered = false;
+      let runLimitStopCancelled = false;
+      // Resolves once an in-flight stop has decided whether the run is still live.
+      // The post-run check waits for this decision only, never for the cancel
+      // itself: a cancel waits for the adapter to settle, which would deadlock here.
+      let runLimitStopDecision: Promise<void> | null = null;
       const stopRunAtLimit = async (kind: RunLimitStopKind, observed: number) => {
         if (runLimitStopTriggered) return;
         runLimitStopTriggered = true;
+        let markDecided!: () => void;
+        runLimitStopDecision = new Promise<void>((resolve) => {
+          markDecided = resolve;
+        });
+        // runLimitStopCancelled is set only once the run is confirmed live and is
+        // being cancelled. The post-run AIC check reads it, not runLimitStopTriggered,
+        // so an attempt that finds the run already ended cannot hide an overrun.
         const isTime = kind === "time";
         const limit = isTime ? runLimits.timeoutSec : runLimits.maxAicPerRun;
         const reason = isTime
           ? `Run time limit reached (${observed}s of ${limit}s)`
           : `AIC cap reached (${observed} of ${limit} AIC)`;
         // The adapter may already be finishing; do not report a stop for a run that ended.
-        const current = await getRun(run.id);
+        let current: Awaited<ReturnType<typeof getRun>>;
+        try {
+          current = await getRun(run.id);
+        } finally {
+          markDecided();
+        }
         if (!current || current.status !== "running") {
           // Nothing was stopped, so let the post-run AIC check report the overrun.
           runLimitStopTriggered = false;
           return;
         }
+        runLimitStopCancelled = true;
         try {
           await appendRunEvent(run, {
             eventType: isTime ? "run.time_limit_exceeded" : "run.aic_cap_exceeded",
@@ -26077,7 +26095,12 @@ export function heartbeatService(
           // Post-run AIC check for adapters that report cost only at run end:
           // the run already finished, so record the overrun and leave resume
           // notes instead of cancelling.
-          if (runLimits.maxAicPerRun && !runLimitStopTriggered) {
+          if (runAicPollTimer) {
+            clearInterval(runAicPollTimer);
+            runAicPollTimer = null;
+          }
+          await runLimitStopDecision;
+          if (runLimits.maxAicPerRun && !runLimitStopCancelled) try {
             const [aicRow] = await db
               .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision` })
               .from(costEvents)
@@ -26117,6 +26140,9 @@ export function heartbeatService(
                 );
               }
             }
+          } catch (err) {
+            // Reporting an overrun must never fail a run that already finished.
+            logger.warn({ err, runId: run.id }, "post-run AIC check failed");
           }
           if (taskKey) {
             if (
