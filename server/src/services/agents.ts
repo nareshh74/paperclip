@@ -727,13 +727,15 @@ export function agentService(db: Db) {
       }
     }
 
+    // Team members report to the team manager; the manager keeps its own reportsTo.
+    const teamManagerId = await teamService(db).assertTeamInCompany(existing.companyId, data.teamId);
+    if (teamManagerId && teamManagerId !== id) data = { ...data, reportsTo: teamManagerId };
     if (data.reportsTo !== undefined) {
       if (data.reportsTo) {
         await ensureManager(existing.companyId, data.reportsTo);
       }
       await assertNoCycle(id, data.reportsTo);
     }
-    await teamService(db).assertTeamInCompany(existing.companyId, data.teamId);
 
     if (data.name !== undefined) {
       const previousShortname = normalizeAgentUrlKey(existing.name);
@@ -879,10 +881,11 @@ export function agentService(db: Db) {
 
     create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
       assertBuiltInAgentMetadataMutationAllowed(null, data.metadata, options);
+      const teamManagerId = await teamService(db).assertTeamInCompany(companyId, data.teamId);
+      if (teamManagerId) data = { ...data, reportsTo: teamManagerId };
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
       }
-      await teamService(db).assertTeamInCompany(companyId, data.teamId);
 
       const existingAgents = await db
         .select({ id: agents.id, name: agents.name, status: agents.status })

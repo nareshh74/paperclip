@@ -1488,7 +1488,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               />
             </Field>
             {(companyTeams.length > 0 || props.agent.teamId) && (
-            <Field label="Team" hint="Team default model and output-token cap apply when this agent does not set its own.">
+            <Field label="Team" hint="Team model applies when this agent does not set its own. Team caps are ceilings. The team manager becomes this agent's manager.">
               <select
                 className={inputClass}
                 value={eff("identity", "teamId", props.agent.teamId ?? "") ?? ""}
@@ -1504,12 +1504,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               </select>
             </Field>
             )}
-            <Field label="Max output tokens per run" hint="Stops a run mid-way when it goes over this. Empty inherits the team or company cap.">
+            <Field label="Max AIC per run" hint="Stops a run mid-way when its recorded AIC goes over this. Cannot exceed the team or company cap. Empty inherits it.">
               <DraftInput
-                value={eff("adapterConfig", "maxOutputTokensPerRun", config.maxOutputTokensPerRun == null ? "" : String(config.maxOutputTokensPerRun))}
+                value={eff("adapterConfig", "maxAicPerRun", config.maxAicPerRun == null ? "" : String(config.maxAicPerRun))}
                 onCommit={(v) => {
                   const n = Number(v);
-                  mark("adapterConfig", "maxOutputTokensPerRun", v.trim() && Number.isInteger(n) && n > 0 ? n : undefined);
+                  mark("adapterConfig", "maxAicPerRun", v.trim() && Number.isInteger(n) && n > 0 ? n : undefined);
                 }}
                 immediate
                 className={inputClass}

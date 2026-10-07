@@ -8,6 +8,7 @@ import {
   companies,
   costEvents,
   projects,
+  teams,
 } from "@paperclipai/db";
 import type {
   BudgetIncident,
@@ -121,6 +122,17 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
     };
   }
 
+  if (scopeType === "team") {
+    // Teams have no pause state of their own; a team hard stop blocks member runs.
+    const row = await db
+      .select({ companyId: teams.companyId, name: teams.name })
+      .from(teams)
+      .where(eq(teams.id, scopeId))
+      .then((rows) => rows[0] ?? null);
+    if (!row) throw notFound("Team not found");
+    return { companyId: row.companyId, name: row.name, paused: false, pauseReason: null };
+  }
+
   const row = await db
     .select({
       companyId: projects.companyId,
@@ -149,6 +161,15 @@ async function computeObservedAmount(
   const conditions = [eq(costEvents.companyId, policy.companyId)];
   if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
   if (policy.scopeType === "project") conditions.push(eq(costEvents.projectId, policy.scopeId));
+  if (policy.scopeType === "team") {
+    // Spend of current team members, by agent. ponytail: membership is read now, not at event time.
+    conditions.push(
+      inArray(
+        costEvents.agentId,
+        db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, policy.companyId), eq(agents.teamId, policy.scopeId))),
+      ),
+    );
+  }
   const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
   if (policy.windowKind === "calendar_month_utc") {
     conditions.push(gte(costEvents.occurredAt, start));
@@ -226,6 +247,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       return;
     }
 
+    if (policy.scopeType === "team") return;
+
     if (policy.scopeType === "project") {
       await db
         .update(projects)
@@ -272,6 +295,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .where(and(eq(agents.id, policy.scopeId), eq(agents.pauseReason, "budget")));
       return;
     }
+
+    if (policy.scopeType === "team") return;
 
     if (policy.scopeType === "project") {
       await db
@@ -654,11 +679,19 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           and(
             eq(budgetPolicies.companyId, event.companyId),
             eq(budgetPolicies.isActive, true),
-            inArray(budgetPolicies.scopeType, ["company", "agent", "project"]),
+            inArray(budgetPolicies.scopeType, ["company", "agent", "project", "team"]),
           ),
         );
 
+      const eventAgentTeamId = candidatePolicies.some((policy) => policy.scopeType === "team")
+        ? await db
+            .select({ teamId: agents.teamId })
+            .from(agents)
+            .where(eq(agents.id, event.agentId))
+            .then((rows) => rows[0]?.teamId ?? null)
+        : null;
       const relevantPolicies = candidatePolicies.filter((policy) => {
+        if (policy.scopeType === "team") return Boolean(eventAgentTeamId) && policy.scopeId === eventAgentTeamId;
         if (policy.scopeType === "company") return policy.scopeId === event.companyId;
         if (policy.scopeType === "agent") return policy.scopeId === event.agentId;
         if (policy.scopeType === "project") return Boolean(event.projectId) && policy.scopeId === event.projectId;
@@ -726,6 +759,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           pauseReason: agents.pauseReason,
           companyId: agents.companyId,
           name: agents.name,
+          teamId: agents.teamId,
         })
         .from(agents)
         .where(eq(agents.id, agentId))
@@ -810,6 +844,34 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             scopeName: agent.name,
             reason: "Agent cannot start because its budget hard-stop is still exceeded.",
           };
+        }
+      }
+
+      if (agent.teamId) {
+        const teamPolicy = await db
+          .select({ policy: budgetPolicies, teamName: teams.name })
+          .from(budgetPolicies)
+          .innerJoin(teams, eq(teams.id, budgetPolicies.scopeId))
+          .where(
+            and(
+              eq(budgetPolicies.companyId, companyId),
+              eq(budgetPolicies.scopeType, "team"),
+              eq(budgetPolicies.scopeId, agent.teamId),
+              eq(budgetPolicies.isActive, true),
+              eq(budgetPolicies.metric, "billed_cents"),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        if (teamPolicy && teamPolicy.policy.hardStopEnabled && teamPolicy.policy.amount > 0) {
+          const observed = await computeObservedAmount(db, teamPolicy.policy);
+          if (observed >= teamPolicy.policy.amount) {
+            return {
+              scopeType: "team" as const,
+              scopeId: agent.teamId,
+              scopeName: teamPolicy.teamName,
+              reason: "Team cannot start new work because its budget hard-stop is exceeded.",
+            };
+          }
         }
       }
 

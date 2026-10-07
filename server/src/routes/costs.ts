@@ -1,3 +1,4 @@
+import { assertBoardOrCeo } from "./teams.js";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import {
@@ -297,10 +298,13 @@ export function costRoutes(
     "/companies/:companyId/budgets/policies",
     validate(upsertBudgetPolicySchema),
     async (req, res) => {
-      assertBoard(req);
       const companyId = req.params.companyId as string;
+      // The company sets team budgets: the board, or the CEO agent for team scopes.
+      if (req.body.scopeType === "team") await assertBoardOrCeo(db, req, companyId);
+      else assertBoard(req);
       assertCompanyAccess(req, companyId);
-      const summary = await budgets.upsertPolicy(companyId, req.body, req.actor.userId ?? "board");
+      const actorId = req.actor.type === "agent" ? `agent:${req.actor.agentId}` : (req.actor.userId ?? "board");
+      const summary = await budgets.upsertPolicy(companyId, req.body, actorId);
       res.json(summary);
     },
   );

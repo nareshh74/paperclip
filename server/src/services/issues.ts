@@ -6618,6 +6618,50 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+export const AGENT_HAS_TASK_IN_PROGRESS_CODE = "agent_has_task_in_progress";
+
+/**
+ * One task at a time: an agent may hold at most one in_progress issue.
+ * A rejected pickup is logged as `agent.task_pickup_rejected` so the company can
+ * count rejections as a scaling signal.
+ * ponytail: check-then-write, not a DB constraint; a concurrent pickup race can still slip through.
+ */
+async function assertAgentHasNoOtherTaskInProgress(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  issueId: string,
+) {
+  const other = await db
+    .select({ id: issues.id, identifier: issues.identifier })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        eq(issues.assigneeAgentId, agentId),
+        eq(issues.status, "in_progress"),
+        ne(issues.id, issueId),
+      ),
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+  if (!other) return;
+  await logActivity(db, {
+    companyId,
+    actorType: "system",
+    actorId: "issue_service",
+    agentId,
+    action: "agent.task_pickup_rejected",
+    entityType: "agent",
+    entityId: agentId,
+    details: { agentId, blockedIssueId: issueId, inProgressIssueId: other.id },
+  });
+  throw conflict(
+    `Agent already has a task in progress (${other.identifier ?? other.id}). Finish or release it before starting another.`,
+    { code: AGENT_HAS_TASK_IN_PROGRESS_CODE, agentId, blockedIssueId: issueId, inProgressIssueId: other.id },
+  );
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -10778,6 +10822,13 @@ export function issueService(db: Db) {
       ) {
         throw unprocessable("in_progress issues require an assignee");
       }
+      if (
+        nextAssigneeAgentId &&
+        (patch.status ?? existing.status) === "in_progress" &&
+        (existing.status !== "in_progress" || nextAssigneeAgentId !== existing.assigneeAgentId)
+      ) {
+        await assertAgentHasNoOtherTaskInProgress(db, existing.companyId, nextAssigneeAgentId, id);
+      }
       if (patch.status === "in_progress") {
         const dependencyReadiness =
           blockedByIssueIds === undefined
@@ -11453,6 +11504,7 @@ export function issueService(db: Db) {
 
       await clearExecutionRunIfTerminal(id);
       await clearCheckoutRunIfTerminal(id);
+      await assertAgentHasNoOtherTaskInProgress(db, issueCompany.companyId, agentId, id);
 
       const dependencyReadiness = await listIssueDependencyReadinessMap(
         db,

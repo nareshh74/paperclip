@@ -4,22 +4,22 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, authUsers, companies, createDb, issueComments, issues, teams } from "@paperclipai/db";
+import { agents, authUsers, companies, costEvents, createDb, issueComments, issues, teams } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { registerServerAdapter, unregisterServerAdapter } from "../adapters/index.ts";
-import { OUTPUT_TOKEN_CAP_ERROR_CODE, RUN_TIME_LIMIT_ERROR_CODE } from "../services/run-limits.ts";
+import { RUN_AIC_CAP_ERROR_CODE, RUN_TIME_LIMIT_ERROR_CODE, runLimitTiming } from "../services/run-limits.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
-const TEST_ADAPTER_TYPE = "output_token_cap_capture";
+const TEST_ADAPTER_TYPE = "run_limit_capture";
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
-    `Skipping embedded Postgres heartbeat output-token cap tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
+    `Skipping embedded Postgres heartbeat run limit tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
   );
 }
 
@@ -41,8 +41,11 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
   let paperclipHome: string | null = null;
   const capturedConfigs: Array<Record<string, unknown>> = [];
   let messagesEmitted = 0;
+  let recordAic = false;
+  const defaultAicPollMs = runLimitTiming.aicPollIntervalMs;
 
   beforeAll(async () => {
+    runLimitTiming.aicPollIntervalMs = 100;
     tempDb = await startEmbeddedPostgresTestDatabase("heartbeat-run-limits-");
     db = createDb(tempDb.connectionString);
     oldPaperclipHome = process.env.PAPERCLIP_HOME;
@@ -55,13 +58,21 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
       execute: async (ctx) => {
         capturedConfigs.push(ctx.config);
         await ctx.onCancellationReady?.();
-        // Stream Claude-style assistant messages until the host aborts the run.
+        // Record 100 AIC (cents) per step for this run, like the pilot bridge does, until aborted.
         for (let i = 0; i < 200 && !ctx.signal?.aborted; i += 1) {
           messagesEmitted += 1;
-          await ctx.onLog(
-            "stdout",
-            `${JSON.stringify({ type: "assistant", message: { id: `m${i}`, usage: { output_tokens: 100 } } })}\n`,
-          );
+          await ctx.onLog("stdout", `step ${i}\n`);
+          if (recordAic) {
+            await db.insert(costEvents).values({
+              companyId: ctx.agent.companyId,
+              agentId: ctx.agent.id,
+              heartbeatRunId: ctx.runId,
+              provider: "pilot",
+              model: "test",
+              costCents: 100,
+              occurredAt: new Date(),
+            });
+          }
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return { exitCode: ctx.signal?.aborted ? null : 0, signal: null, timedOut: false };
@@ -78,6 +89,7 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
   afterEach(async () => {
     capturedConfigs.length = 0;
     messagesEmitted = 0;
+    recordAic = false;
     // Post-cancel finalization may still be writing; retry a deadlocked truncate.
     for (let attempt = 0; ; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -95,6 +107,7 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
     db.execute(sql.raw(`
       TRUNCATE TABLE
         "activity_log",
+        "cost_events",
         "issue_comments",
         "heartbeat_run_events",
         "heartbeat_runs",
@@ -109,6 +122,7 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
 
   afterAll(async () => {
     unregisterServerAdapter(TEST_ADAPTER_TYPE);
+    runLimitTiming.aicPollIntervalMs = defaultAicPollMs;
     if (oldPaperclipHome === undefined) delete process.env.PAPERCLIP_HOME;
     else process.env.PAPERCLIP_HOME = oldPaperclipHome;
     if (oldPaperclipApiUrl === undefined) delete process.env.PAPERCLIP_API_URL;
@@ -117,7 +131,8 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
     await tempDb?.cleanup();
   });
 
-  it("injects the team model and stops the run mid-stream at the company cap with resume notes", async () => {
+  it("injects the team model and stops the run mid-run at the company AIC ceiling with resume notes", async () => {
+    recordAic = true;
     const companyId = randomUUID();
     const teamId = randomUUID();
     const agentId = randomUUID();
@@ -133,9 +148,10 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
       issuePrefix,
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
-      runLimits: { model: "company-model", maxOutputTokensPerRun: 450 },
+      runLimits: { model: "company-model", maxAicPerRun: 450 },
     });
-    await db.insert(teams).values({ id: teamId, companyId, name: "Platform", runLimits: { model: "team-model" } });
+    // The team asks for more than the company ceiling, so the company value applies.
+    await db.insert(teams).values({ id: teamId, companyId, name: "Platform", runLimits: { model: "team-model", maxAicPerRun: 5000 } });
     await db.insert(agents).values({
       id: agentId,
       companyId,
@@ -167,13 +183,14 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
 
     expect(capturedConfigs[0]?.model).toBe("team-model");
     expect(finished?.status).toBe("cancelled");
-    expect(finished?.errorCode).toBe(OUTPUT_TOKEN_CAP_ERROR_CODE);
-    // 5 messages x 100 tokens crosses 450; the adapter must not run to its 200-message end.
-    expect(messagesEmitted).toBeLessThan(20);
+    expect(finished?.errorCode).toBe(RUN_AIC_CAP_ERROR_CODE);
+    // 5 steps x 100 AIC crosses 450; with a 100ms poll the adapter must stop well before its 200-step end.
+    expect(messagesEmitted).toBeLessThan(60);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
-    const capComment = comments.find((comment) => comment.body.includes("output-token cap reached"));
+    const capComment = comments.find((comment) => comment.body.includes("AIC cap reached"));
     expect(capComment?.body).toContain("set at company level");
+    expect(capComment?.body).toContain("asked for more than the company ceiling");
     expect(capComment?.body).toContain("Next actions");
     expect(capComment?.body).toContain("team-model (from team)");
   }, 30_000);
@@ -222,14 +239,14 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
     });
 
     const heartbeat = heartbeatService(db);
-    const startedAt = Date.now();
     const run = await heartbeat.invoke(agentId, "on_demand", { issueId, taskId: issueId }, "manual");
     const finished = await waitForRunToFinish(heartbeat, run!.id);
 
     expect(finished?.status).toBe("cancelled");
     expect(finished?.errorCode).toBe(RUN_TIME_LIMIT_ERROR_CODE);
-    // The adapter would emit for about 4s (200 x 20ms); the 1s team limit must cut it short.
-    expect(Date.now() - startedAt).toBeLessThan(4_000);
+    // The adapter would emit 200 steps of 20ms (about 4s); the 1s team limit must cut it short.
+    // Count steps, not wall-clock time, so a slow host does not make the check flaky.
+    expect(messagesEmitted).toBeLessThan(150);
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
     const stopComment = comments.find((comment) => comment.body.includes("time limit reached"));

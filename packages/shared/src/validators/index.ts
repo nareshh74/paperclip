@@ -280,8 +280,12 @@ export {
   runLimitsSchema,
   createTeamSchema,
   updateTeamSchema,
+  linkTeamProjectSchema,
+  projectPmHandoffSchema,
   type CreateTeam,
   type UpdateTeam,
+  type LinkTeamProject,
+  type ProjectPmHandoffInput,
 } from "./team.js";
 export {
   catalogTeamKindSchema,

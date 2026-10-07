@@ -903,7 +903,7 @@ export function IssueProperties({
             </div>
           </div>
           {([
-            ["maxOutputTokensPerRun", "Max output tokens per run"],
+            ["maxAicPerRun", "Max AIC per run"],
             ["timeoutSec", "Time limit per run (sec)"],
           ] as const).map(([key, label]) => (
             <div key={key} className="space-y-1.5">

@@ -96,6 +96,8 @@ import {
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
+import { assertBoardCeoOrTeamManager } from "./teams.js";
+import { teamService } from "../services/teams.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
 import { isLoginCommandSupportedAdapterType } from "../services/login-command.js";
@@ -5425,6 +5427,15 @@ export function agentRoutes(
     if (hasOwn(req.body as object, "permissions")) {
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
       return;
+    }
+    if (hasOwn(req.body as object, "teamId") && (req.body as { teamId?: string | null }).teamId !== existing.teamId) {
+      // Moving an agent between teams needs the manager of every team touched, the CEO, or the board.
+      const teams = teamService(db);
+      for (const teamId of [existing.teamId, (req.body as { teamId?: string | null }).teamId]) {
+        if (!teamId) continue;
+        const managerAgentId = await teams.assertTeamInCompany(existing.companyId, teamId);
+        await assertBoardCeoOrTeamManager(db, req, existing.companyId, [managerAgentId]);
+      }
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };

@@ -1,47 +1,75 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildRunLimitStopComment,
-  createOutputTokenMeter,
-  resolveEffectiveRunLimits,
-} from "../services/run-limits.js";
+import { buildRunLimitStopComment, resolveEffectiveRunLimits } from "../services/run-limits.js";
 
 describe("resolveEffectiveRunLimits", () => {
-  it("resolves each key from the most specific level that sets it", () => {
+  it("lets each lower level only lower a ceiling, and picks the most specific model", () => {
     const scopes = {
       task: { model: "task-model" },
-      agent: { model: "agent-model", maxOutputTokensPerRun: 500 },
-      team: { model: "team-model", maxOutputTokensPerRun: 1000, timeoutSec: 600 },
-      company: { model: "company-model", maxOutputTokensPerRun: 2000, timeoutSec: 3600 },
+      agent: { model: "agent-model", maxAicPerRun: 500 },
+      team: { model: "team-model", maxAicPerRun: 1000, timeoutSec: 600 },
+      company: { model: "company-model", maxAicPerRun: 2000, timeoutSec: 3600 },
     };
     expect(resolveEffectiveRunLimits(scopes)).toEqual({
       model: "task-model",
-      maxOutputTokensPerRun: 500,
+      maxAicPerRun: 500,
       timeoutSec: 600,
-      sources: { model: "task", maxOutputTokensPerRun: "agent", timeoutSec: "team" },
+      sources: { model: "task", maxAicPerRun: "agent", timeoutSec: "team" },
+      clamped: [],
     });
     expect(resolveEffectiveRunLimits({ company: scopes.company })).toEqual({
       model: "company-model",
-      maxOutputTokensPerRun: 2000,
+      maxAicPerRun: 2000,
       timeoutSec: 3600,
-      sources: { model: "company", maxOutputTokensPerRun: "company", timeoutSec: "company" },
+      sources: { model: "company", maxAicPerRun: "company", timeoutSec: "company" },
+      clamped: [],
     });
+  });
+
+  it("clamps a lower level that asks for more than its ceiling", () => {
+    const limits = resolveEffectiveRunLimits({
+      task: { maxAicPerRun: 50_000, timeoutSec: 30 },
+      agent: { maxAicPerRun: 9_000 },
+      team: { maxAicPerRun: 3_000, timeoutSec: 7200 },
+      company: { maxAicPerRun: 2_000, timeoutSec: 3600 },
+    });
+    expect(limits.maxAicPerRun).toBe(2_000);
+    expect(limits.sources.maxAicPerRun).toBe("company");
+    expect(limits.timeoutSec).toBe(30);
+    expect(limits.sources.timeoutSec).toBe("task");
+    expect(limits.clamped).toEqual(["maxAicPerRun", "timeoutSec"]);
+  });
+
+  it("uses the lowest value when only lower levels set it", () => {
+    const limits = resolveEffectiveRunLimits({ task: { maxAicPerRun: 80 }, agent: { maxAicPerRun: 100 } });
+    expect(limits).toMatchObject({ maxAicPerRun: 80, sources: { maxAicPerRun: "task" }, clamped: [] });
   });
 
   it("ignores blank models and non-positive or fractional numbers", () => {
     expect(
       resolveEffectiveRunLimits({
-        agent: { model: "  ", maxOutputTokensPerRun: 0, timeoutSec: 1.5 },
-        company: { model: null, maxOutputTokensPerRun: -1, timeoutSec: "60" },
+        agent: { model: "  ", maxAicPerRun: 0, timeoutSec: 1.5 },
+        company: { model: null, maxAicPerRun: -1, timeoutSec: "60" },
       }),
-    ).toEqual({ model: null, maxOutputTokensPerRun: null, timeoutSec: null, sources: {} });
+    ).toEqual({ model: null, maxAicPerRun: null, timeoutSec: null, sources: {}, clamped: [] });
   });
 });
 
 describe("resolveEffectiveRunLimits time limit opt-out", () => {
-  it("treats a negative timeoutSec as an explicit no-limit that stops inheritance", () => {
-    const limits = resolveEffectiveRunLimits({ agent: { timeoutSec: -1 }, company: { timeoutSec: 600 } });
+  it("treats a negative agent timeoutSec as no adapter timeout when no ceiling exists", () => {
+    const limits = resolveEffectiveRunLimits({ agent: { timeoutSec: -1 } });
     expect(limits.timeoutSec).toBeNull();
     expect(limits.sources.timeoutSec).toBeUndefined();
+  });
+
+  it("does not let a negative agent or task timeoutSec remove a company or team ceiling", () => {
+    const fromCompany = resolveEffectiveRunLimits({ agent: { timeoutSec: -1 }, company: { timeoutSec: 600 } });
+    expect(fromCompany).toMatchObject({ timeoutSec: 600, sources: { timeoutSec: "company" }, clamped: ["timeoutSec"] });
+    const fromTeam = resolveEffectiveRunLimits({
+      task: { timeoutSec: -1 },
+      agent: { timeoutSec: 120 },
+      team: { timeoutSec: 300 },
+    });
+    expect(fromTeam).toMatchObject({ timeoutSec: 300, sources: { timeoutSec: "team" } });
   });
 
   it("treats timeoutSec 0 as unset, as the adapter UI stores 0 for untouched fields", () => {
@@ -49,61 +77,40 @@ describe("resolveEffectiveRunLimits time limit opt-out", () => {
   });
 });
 
-describe("createOutputTokenMeter", () => {
-  it("counts Claude assistant usage once per message across split chunks", () => {
-    const meter = createOutputTokenMeter();
-    const a1 = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { output_tokens: 40 } } });
-    const a2 = JSON.stringify({ type: "assistant", message: { id: "m2", usage: { output_tokens: 60 } } });
-    meter.push(`${a1}\n${a1.slice(0, 10)}`);
-    meter.push(`${a1.slice(10)}\n${a2}\nnot json\n`);
-    expect(meter.total()).toBe(100);
-  });
-
-  it("counts each assistant event without an id as its own message", () => {
-    const meter = createOutputTokenMeter();
-    const anon = JSON.stringify({ type: "assistant", message: { usage: { output_tokens: 10 } } });
-    meter.push(`${anon}
-${anon}
-${anon}
-`);
-    expect(meter.total()).toBe(30);
-  });
-
-  it("sums Codex turns and takes a larger final result total", () => {
-    const meter = createOutputTokenMeter();
-    meter.push(`${JSON.stringify({ type: "turn.completed", usage: { output_tokens: 30 } })}\n`);
-    meter.push(`${JSON.stringify({ type: "turn.completed", usage: { output_tokens: 20 } })}\n`);
-    expect(meter.total()).toBe(50);
-    meter.push(`${JSON.stringify({ type: "result", usage: { output_tokens: 75 } })}\n`);
-    expect(meter.total()).toBe(75);
-  });
-});
-
 describe("buildRunLimitStopComment", () => {
   const limits = {
-    model: "m",
-    maxOutputTokensPerRun: 1000,
-    timeoutSec: 60,
-    sources: { model: "team", maxOutputTokensPerRun: "company", timeoutSec: "task" } as const,
+    model: "team-model",
+    maxAicPerRun: 1000,
+    timeoutSec: 600,
+    sources: { model: "team", maxAicPerRun: "company", timeoutSec: "task" } as const,
+    clamped: [] as Array<"maxAicPerRun" | "timeoutSec" | "model">,
   };
 
-  it("names the token cap level and the next actions", () => {
+  it("names the AIC cap, its level, and resume steps", () => {
     const body = buildRunLimitStopComment({
-      kind: "output_tokens", runId: "run-1", agentName: "Builder", observed: 1200,
+      kind: "aic", runId: "run-1", agentName: "Builder", observed: 1200,
       limits, lastOutputExcerpt: "last line",
     });
-    expect(body).toContain("output-token cap reached (1200 of 1000 tokens, set at company level)");
-    expect(body).toContain("Raise `maxOutputTokensPerRun` at the company level");
-    expect(body).toContain("model: m (from team)");
+    expect(body).toContain("AIC cap reached (1200 of 1000 AIC, set at company level)");
+    expect(body).toContain("Raise `maxAicPerRun` at the company level");
+    expect(body).toContain("team-model (from team)");
     expect(body).toContain("last line");
+    expect(body).not.toContain("ceiling, so");
   });
 
-  it("names the time limit level", () => {
+  it("mentions clamping when a lower level asked for more", () => {
     const body = buildRunLimitStopComment({
-      kind: "time", runId: "run-1", agentName: "Builder", observed: 61,
-      limits, lastOutputExcerpt: null,
+      kind: "aic", runId: "run-1", agentName: "Builder", observed: 1200,
+      limits: { ...limits, clamped: ["maxAicPerRun"] }, lastOutputExcerpt: null,
     });
-    expect(body).toContain("time limit reached (61s of 60s, set at task level)");
-    expect(body).toContain("Raise `timeoutSec` at the task level");
+    expect(body).toContain("asked for more than the company ceiling");
+  });
+
+  it("describes a time stop", () => {
+    const body = buildRunLimitStopComment({
+      kind: "time", runId: "run-2", agentName: "Builder", observed: 601, limits, lastOutputExcerpt: null,
+    });
+    expect(body).toContain("time limit reached (601s of 600s, set at task level)");
+    expect(body).not.toContain("Last output before stop");
   });
 });

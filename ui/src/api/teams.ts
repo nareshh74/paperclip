@@ -10,4 +10,10 @@ export const teamsApi = {
     api.patch<Team>(`${base(companyId)}/${encodeURIComponent(teamId)}`, payload),
   remove: (companyId: string, teamId: string) =>
     api.delete<void>(`${base(companyId)}/${encodeURIComponent(teamId)}`),
+  linkProject: (companyId: string, teamId: string, projectId: string) =>
+    api.post<Team>(`${base(companyId)}/${encodeURIComponent(teamId)}/projects`, { projectId }),
+  unlinkProject: (companyId: string, teamId: string, projectId: string) =>
+    api.delete<void>(
+      `${base(companyId)}/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}`,
+    ),
 };

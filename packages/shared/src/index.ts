@@ -2628,14 +2628,18 @@ export type {
   MoveFolderItemRequest,
   EnsureMySkillFolderRequest,
 } from "./types/folder.js";
-export type { Team, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./types/team.js";
+export type { Team, ProjectPmHandoff, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./types/team.js";
 export { RUN_LIMIT_KEYS } from "./types/team.js";
 export {
   runLimitsSchema,
   createTeamSchema,
   updateTeamSchema,
+  linkTeamProjectSchema,
+  projectPmHandoffSchema,
   type CreateTeam,
   type UpdateTeam,
+  type LinkTeamProject,
+  type ProjectPmHandoffInput,
 } from "./validators/team.js";
 
 export {

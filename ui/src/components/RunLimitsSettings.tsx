@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Company, RunLimits, Team } from "@paperclipai/shared";
+import type { Agent, Company, Project, RunLimits, Team } from "@paperclipai/shared";
+import { agentsApi } from "../api/agents";
 import { companiesApi } from "../api/companies";
+import { projectsApi } from "../api/projects";
 import { teamsApi } from "../api/teams";
 import { queryKeys } from "../lib/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -10,12 +12,12 @@ import { Field } from "./agent-config-primitives";
 const inputClass =
   "w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none";
 
-type Draft = { model: string; maxOutputTokensPerRun: string; timeoutSec: string };
+type Draft = { model: string; maxAicPerRun: string; timeoutSec: string };
 
 function toDraft(limits: RunLimits | null | undefined): Draft {
   return {
     model: limits?.model ?? "",
-    maxOutputTokensPerRun: limits?.maxOutputTokensPerRun?.toString() ?? "",
+    maxAicPerRun: limits?.maxAicPerRun?.toString() ?? "",
     timeoutSec: limits?.timeoutSec?.toString() ?? "",
   };
 }
@@ -29,22 +31,22 @@ function toPositiveInt(value: string): number | null {
 function draftToRunLimits(draft: Draft): RunLimits {
   const limits: RunLimits = {};
   if (draft.model.trim()) limits.model = draft.model.trim();
-  const cap = toPositiveInt(draft.maxOutputTokensPerRun);
-  if (cap) limits.maxOutputTokensPerRun = cap;
+  const cap = toPositiveInt(draft.maxAicPerRun);
+  if (cap) limits.maxAicPerRun = cap;
   const timeout = toPositiveInt(draft.timeoutSec);
   if (timeout) limits.timeoutSec = timeout;
   return limits;
 }
 
 function sameDraft(a: Draft, b: Draft) {
-  return a.model === b.model && a.maxOutputTokensPerRun === b.maxOutputTokensPerRun && a.timeoutSec === b.timeoutSec;
+  return a.model === b.model && a.maxAicPerRun === b.maxAicPerRun && a.timeoutSec === b.timeoutSec;
 }
 
 function errorText(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-/** Model, output-token cap, and time limit fields shared by company and team rows. */
+/** Model, AIC cap, and time limit fields shared by company and team rows. */
 function RunLimitFields(props: { value: Draft; onChange: (next: Draft) => void; testIdPrefix: string }) {
   const set = (key: keyof Draft) => (e: React.ChangeEvent<HTMLInputElement>) =>
     props.onChange({ ...props.value, [key]: e.target.value });
@@ -60,16 +62,16 @@ function RunLimitFields(props: { value: Draft; onChange: (next: Draft) => void; 
         />
       </Field>
       <Field
-        label="Max output tokens per run"
-        hint="A run that goes over this is stopped mid-run and leaves resume notes on the task."
+        label="Max AIC per run"
+        hint="A run whose recorded AIC goes over this is stopped mid-run and leaves resume notes on the task."
       >
         <input
           className={inputClass}
           type="number"
           min={1}
-          value={props.value.maxOutputTokensPerRun}
+          value={props.value.maxAicPerRun}
           placeholder="Inherit"
-          onChange={set("maxOutputTokensPerRun")}
+          onChange={set("maxAicPerRun")}
           data-testid={`${props.testIdPrefix}-cap`}
         />
       </Field>
@@ -88,7 +90,17 @@ function RunLimitFields(props: { value: Draft; onChange: (next: Draft) => void; 
   );
 }
 
-function TeamRow({ companyId, team }: { companyId: string; team: Team }) {
+function TeamRow({
+  companyId,
+  team,
+  agents,
+  projects,
+}: {
+  companyId: string;
+  team: Team;
+  agents: Agent[];
+  projects: Project[];
+}) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => toDraft(team.runLimits));
   const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.teams.list(companyId) });
@@ -98,6 +110,21 @@ function TeamRow({ companyId, team }: { companyId: string; team: Team }) {
     onSuccess: invalidate,
   });
   const remove = useMutation({ mutationFn: () => teamsApi.remove(companyId, team.id), onSuccess: invalidate });
+  const setManager = useMutation({
+    mutationFn: (managerAgentId: string | null) => teamsApi.update(companyId, team.id, { managerAgentId }),
+    onSuccess: invalidate,
+  });
+  const linkProject = useMutation({
+    mutationFn: (projectId: string) => teamsApi.linkProject(companyId, team.id, projectId),
+    onSuccess: invalidate,
+  });
+  const unlinkProject = useMutation({
+    mutationFn: (projectId: string) => teamsApi.unlinkProject(companyId, team.id, projectId),
+    onSuccess: invalidate,
+  });
+  const linkedIds = team.projectIds ?? [];
+  const linkable = projects.filter((project) => !linkedIds.includes(project.id));
+  const mutationError = save.error ?? remove.error ?? setManager.error ?? linkProject.error ?? unlinkProject.error;
   const dirty = !sameDraft(draft, toDraft(team.runLimits));
 
   return (
@@ -115,6 +142,58 @@ function TeamRow({ companyId, team }: { companyId: string; team: Team }) {
           Delete
         </Button>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Manager" hint="Members report to the manager. The manager reports to the CEO.">
+          <select
+            className={inputClass}
+            value={team.managerAgentId ?? ""}
+            disabled={setManager.isPending}
+            onChange={(e) => setManager.mutate(e.target.value || null)}
+            data-testid="run-limits-team-manager"
+          >
+            <option value="">No manager</option>
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Projects" hint="Projects this team works on. Does not limit task assignment.">
+          <select
+            className={inputClass}
+            value=""
+            disabled={linkProject.isPending || linkable.length === 0}
+            onChange={(e) => e.target.value && linkProject.mutate(e.target.value)}
+            data-testid="run-limits-team-add-project"
+          >
+            <option value="">Add project…</option>
+            {linkable.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+      {linkedIds.length > 0 && (
+        <div className="flex flex-wrap gap-2" data-testid="run-limits-team-projects">
+          {linkedIds.map((projectId) => (
+            <span key={projectId} className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs">
+              {projects.find((project) => project.id === projectId)?.name ?? projectId}
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={unlinkProject.isPending}
+                onClick={() => unlinkProject.mutate(projectId)}
+                aria-label="Remove project"
+              >
+                Remove
+              </Button>
+            </span>
+          ))}
+        </div>
+      )}
       <RunLimitFields value={draft} onChange={setDraft} testIdPrefix="run-limits-team" />
       <div className="flex items-center gap-2">
         {dirty && (
@@ -122,17 +201,15 @@ function TeamRow({ companyId, team }: { companyId: string; team: Team }) {
             {save.isPending ? "Saving..." : "Save team"}
           </Button>
         )}
-        {(save.isError || remove.isError) && (
-          <span className="text-xs text-destructive">
-            {errorText(save.error ?? remove.error, "Failed to update team")}
-          </span>
+        {mutationError && (
+          <span className="text-xs text-destructive">{errorText(mutationError, "Failed to update team")}</span>
         )}
       </div>
     </div>
   );
 }
 
-/** Company- and team-level run limits: model, output-token cap, time limit. */
+/** Company- and team-level run limits (model, AIC cap, time limit), team managers, and team projects. */
 export function RunLimitsSettings({ company }: { company: Company }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(() => toDraft(company.runLimits));
@@ -143,6 +220,15 @@ export function RunLimitsSettings({ company }: { company: Company }) {
   const teamsQuery = useQuery({
     queryKey: queryKeys.teams.list(company.id),
     queryFn: () => teamsApi.list(company.id),
+  });
+
+  const agentsQuery = useQuery({
+    queryKey: queryKeys.agents.list(company.id),
+    queryFn: () => agentsApi.list(company.id),
+  });
+  const projectsQuery = useQuery({
+    queryKey: queryKeys.projects.list(company.id),
+    queryFn: () => projectsApi.list(company.id),
   });
 
   const saveCompany = useMutation({
@@ -165,7 +251,8 @@ export function RunLimitsSettings({ company }: { company: Company }) {
     <div className="max-w-2xl space-y-4" data-testid="company-settings-run-limits">
       <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Run limits</div>
       <p className="text-sm text-muted-foreground">
-        Each limit uses the most specific level that sets it: task, then agent, then team, then company.
+        Limits are ceilings: company, then team, then agent, then task. A lower level can only lower a limit.
+        Model uses the most specific level that sets it.
       </p>
       <RunLimitFields value={draft} onChange={setDraft} testIdPrefix="run-limits-company" />
       {(companyDirty || saveCompany.isError) && (
@@ -184,7 +271,15 @@ export function RunLimitsSettings({ company }: { company: Company }) {
         <span className="text-xs text-destructive">{errorText(teamsQuery.error, "Failed to load teams")}</span>
       )}
       <div className="space-y-2">
-        {teamsQuery.data?.map((team) => <TeamRow key={team.id} companyId={company.id} team={team} />)}
+        {teamsQuery.data?.map((team) => (
+          <TeamRow
+            key={team.id}
+            companyId={company.id}
+            team={team}
+            agents={agentsQuery.data ?? []}
+            projects={projectsQuery.data ?? []}
+          />
+        ))}
       </div>
       <div className="flex items-center gap-2">
         <input

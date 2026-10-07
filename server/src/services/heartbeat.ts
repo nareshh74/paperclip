@@ -1,11 +1,11 @@
 import { externalObjectService } from "./external-objects.js";
 import {
-  OUTPUT_TOKEN_CAP_ERROR_CODE,
+  RUN_AIC_CAP_ERROR_CODE,
   RUN_TIME_LIMIT_ERROR_CODE,
   type RunLimitStopKind,
   buildRunLimitStopComment,
-  createOutputTokenMeter,
   resolveEffectiveRunLimits,
+  runLimitTiming,
 } from "./run-limits.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
@@ -20494,6 +20494,7 @@ export function heartbeatService(
     let providerTraceFinalized = false;
     let readFailureReportSecrets: () => string[] = () => [];
     let runTimeLimitTimer: ReturnType<typeof setTimeout> | null = null;
+    let runAicPollTimer: ReturnType<typeof setInterval> | null = null;
 
     try {
       const agent = await getAgent(run.agentId);
@@ -23225,22 +23226,21 @@ export function heartbeatService(
       } = { current: null };
       let stdoutExcerpt = "";
       let stderrExcerpt = "";
-      const outputTokenMeter = runLimits.maxOutputTokensPerRun ? createOutputTokenMeter() : null;
       let runLimitStopTriggered = false;
       const stopRunAtLimit = async (kind: RunLimitStopKind, observed: number) => {
         if (runLimitStopTriggered) return;
         runLimitStopTriggered = true;
         const isTime = kind === "time";
-        const limit = isTime ? runLimits.timeoutSec : runLimits.maxOutputTokensPerRun;
+        const limit = isTime ? runLimits.timeoutSec : runLimits.maxAicPerRun;
         const reason = isTime
           ? `Run time limit reached (${observed}s of ${limit}s)`
-          : `Output-token cap reached (${observed} of ${limit})`;
+          : `AIC cap reached (${observed} of ${limit} AIC)`;
         // The adapter may already be finishing; do not report a stop for a run that ended.
         const current = await getRun(run.id);
         if (!current || current.status !== "running") return;
         try {
           await appendRunEvent(run, {
-            eventType: isTime ? "run.time_limit_exceeded" : "run.output_token_cap_exceeded",
+            eventType: isTime ? "run.time_limit_exceeded" : "run.aic_cap_exceeded",
             stream: "system",
             level: "warn",
             message: reason,
@@ -23263,7 +23263,7 @@ export function heartbeatService(
         } finally {
           // Stopping the run matters more than the notes, so cancel even if they failed.
           await cancelRunInternal(run.id, reason, {
-            errorCode: isTime ? RUN_TIME_LIMIT_ERROR_CODE : OUTPUT_TOKEN_CAP_ERROR_CODE,
+            errorCode: isTime ? RUN_TIME_LIMIT_ERROR_CODE : RUN_AIC_CAP_ERROR_CODE,
             resultJson: { runLimitStop: { kind, observed, ...runLimits } },
             // A limit stop needs a human or a limit change; an automatic retry would hit it again.
             suppressImmediateRecovery: true,
@@ -23283,6 +23283,28 @@ export function heartbeatService(
           serverTimeLimitSec * 1000,
         );
         runTimeLimitTimer.unref?.();
+      }
+      if (runLimits.maxAicPerRun) {
+        // 1 AIC = 1 cost cent. Cost events for this run are summed while it is live.
+        const aicCap = runLimits.maxAicPerRun;
+        let aicCheckInFlight = false;
+        runAicPollTimer = setInterval(() => {
+          if (aicCheckInFlight || runLimitStopTriggered) return;
+          aicCheckInFlight = true;
+          void db
+            .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision` })
+            .from(costEvents)
+            .where(and(eq(costEvents.companyId, agent.companyId), eq(costEvents.heartbeatRunId, run.id)))
+            .then(([row]) => {
+              const aic = Number(row?.total ?? 0);
+              if (aic > aicCap) fireRunLimitStop("aic", aic);
+            })
+            .catch((err) => logger.warn({ err, runId: run.id }, "failed to read run AIC"))
+            .finally(() => {
+              aicCheckInFlight = false;
+            });
+        }, runLimitTiming.aicPollIntervalMs);
+        runAicPollTimer.unref?.();
       }
       let outputSeq = Number(run.lastOutputSeq ?? 0);
       let lastOutputFlushAt: Date | null = run.lastOutputAt ?? null;
@@ -23418,11 +23440,6 @@ export function heartbeatService(
           );
           if (stream === "stdout")
             stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
-          if (stream === "stdout" && outputTokenMeter && !runLimitStopTriggered) {
-            outputTokenMeter.push(chunk);
-            const outputTokens = outputTokenMeter.total();
-            if (outputTokens > runLimits.maxOutputTokensPerRun!) fireRunLimitStop("output_tokens", outputTokens);
-          }
           if (stream === "stderr")
             stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
           const ts = new Date().toISOString();
@@ -26865,6 +26882,7 @@ export function heartbeatService(
       } finally {
         controllerLease.stop();
         if (runTimeLimitTimer) clearTimeout(runTimeLimitTimer);
+        if (runAicPollTimer) clearInterval(runAicPollTimer);
         activeRunExecutions.delete(run.id);
         // A failed owned Stop remains visible until this exact executor settles,
         // including a graceful exit result arriving after the cancellation error.
@@ -30027,6 +30045,17 @@ export function heartbeatService(
   }
 
   async function cancelBudgetScopeWork(scope: BudgetEnforcementScope) {
+    if (scope.scopeType === "team") {
+      // A team hard stop cancels the live work of each current member.
+      const members = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.companyId, scope.companyId), eq(agents.teamId, scope.scopeId)));
+      for (const member of members) {
+        await cancelBudgetScopeWork({ companyId: scope.companyId, scopeType: "agent", scopeId: member.id });
+      }
+      return;
+    }
     if (scope.scopeType === "agent") {
       await cancelActiveForAgentInternal(
         scope.scopeId,
