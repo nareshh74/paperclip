@@ -1,7 +1,9 @@
-import type { CreateTeam, Team, UpdateTeam } from "@paperclipai/shared";
+import type { CreateTeam, ProjectPmHandoff, ProjectPmHandoffInput, Team, UpdateTeam } from "@paperclipai/shared";
 import { api } from "./client";
 
 const base = (companyId: string) => `/companies/${encodeURIComponent(companyId)}/teams`;
+const projectBase = (companyId: string, projectId: string) =>
+  `/companies/${encodeURIComponent(companyId)}/projects/${encodeURIComponent(projectId)}`;
 
 export const teamsApi = {
   list: (companyId: string) => api.get<Team[]>(base(companyId)),
@@ -16,4 +18,8 @@ export const teamsApi = {
     api.delete<void>(
       `${base(companyId)}/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}`,
     ),
+  handOffProjectManager: (companyId: string, projectId: string, payload: ProjectPmHandoffInput) =>
+    api.post<ProjectPmHandoff>(`${projectBase(companyId, projectId)}/pm-handoff`, payload),
+  listProjectManagerHandoffs: (companyId: string, projectId: string) =>
+    api.get<ProjectPmHandoff[]>(`${projectBase(companyId, projectId)}/pm-handoffs`),
 };

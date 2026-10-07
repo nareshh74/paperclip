@@ -20,6 +20,7 @@ import { InlineEditor } from "../components/InlineEditor";
 import { StatusBadge } from "../components/StatusBadge";
 import { ProjectTile } from "../components/ProjectTile";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { ProjectPmHandoff } from "../components/ProjectPmHandoff";
 import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
@@ -895,6 +896,9 @@ export function ProjectDetail() {
             onArchive={(archived) => archiveProject.mutate(archived)}
             archivePending={archiveProject.isPending}
           />
+          <div className="mt-6">
+            <ProjectPmHandoff project={project} />
+          </div>
         </div>
       )}
 

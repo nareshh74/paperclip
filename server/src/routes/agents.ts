@@ -5596,7 +5596,11 @@ export function agentRoutes(
     const profileOnlyChange = touchesProfileFields && Object.keys(patchData).every((key) =>
       (AGENT_PROFILE_CHANGE_CONSENT_FIELDS as readonly string[]).includes(key),
     );
-    if (profileOnlyChange) {
+    // A team-only change was already authorized against the team managers above.
+    const teamOnlyChange = Object.keys(patchData).every((key) => key === "teamId") && hasOwn(patchData, "teamId");
+    if (teamOnlyChange) {
+      assertCompanyAccess(req, existing.companyId);
+    } else if (profileOnlyChange) {
       await assertCanApplyAgentProfileChange(req, existing);
     } else {
       await assertCanUpdateAgent(req, existing);
@@ -5634,6 +5638,20 @@ export function agentRoutes(
       entityId: agent.id,
       details: summarizeAgentUpdateDetails(patchData),
     });
+    if (patchData.teamId === null && existing.teamId && agent.reportsTo !== existing.reportsTo) {
+      await logActivity(db, {
+        companyId: agent.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        action: "agent.reports_to_reset",
+        entityType: "agent",
+        entityId: agent.id,
+        details: { reason: "left_team", fromTeamId: existing.teamId, fromReportsTo: existing.reportsTo, toReportsTo: agent.reportsTo },
+      });
+    }
 
     res.json(redactAgentRowForResponse(agent));
   });

@@ -780,13 +780,15 @@ export function IssueProperties({
     });
     return Object.keys(next).length > 0 ? next : null;
   };
+  // Edits made before the issue refetch must build on each other, not on the stale prop.
+  const pendingOverrideConfigRef = useRef<Record<string, unknown> | null>(null);
+  useEffect(() => {
+    pendingOverrideConfigRef.current = null;
+  }, [assigneeAdapterOverrides]);
   const updateAssigneeOverrideConfig = (patch: Record<string, unknown>) => {
-    updateAssigneeAdapterOverrides(
-      buildAssigneeOverrideWithConfig({
-        ...assigneeOverrideAdapterConfig,
-        ...patch,
-      }),
-    );
+    const nextConfig = { ...(pendingOverrideConfigRef.current ?? assigneeOverrideAdapterConfig), ...patch };
+    pendingOverrideConfigRef.current = nextConfig;
+    updateAssigneeAdapterOverrides(buildAssigneeOverrideWithConfig(nextConfig));
   };
   const updateAssigneeOverrideThinkingEffort = (nextValue: string) => {
     const nextConfig = { ...assigneeOverrideAdapterConfig };

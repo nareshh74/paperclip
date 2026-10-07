@@ -730,6 +730,15 @@ export function agentService(db: Db) {
     // Team members report to the team manager; the manager keeps its own reportsTo.
     const teamManagerId = await teamService(db).assertTeamInCompany(existing.companyId, data.teamId);
     if (teamManagerId && teamManagerId !== id) data = { ...data, reportsTo: teamManagerId };
+    // Leaving a team without a new manager: report to the CEO when the company has one.
+    if (data.teamId === null && existing.teamId && data.reportsTo === undefined) {
+      const ceo = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.companyId, existing.companyId), eq(agents.role, "ceo"), ne(agents.id, id)))
+        .then((rows) => rows[0] ?? null);
+      if (ceo) data = { ...data, reportsTo: ceo.id };
+    }
     if (data.reportsTo !== undefined) {
       if (data.reportsTo) {
         await ensureManager(existing.companyId, data.reportsTo);
