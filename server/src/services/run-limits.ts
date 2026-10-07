@@ -79,7 +79,14 @@ export function resolveEffectiveRunLimits(
   return result;
 }
 
-/** Issue comment that lets a later session or agent resume after a limit stop. */
+/**
+ * Issue comment that lets a later session or agent resume after a limit stop.
+ *
+ * The AIC cap stops a run mid-run only when the adapter streams cost events
+ * while it works. Adapters that report cost only at run end are capped
+ * post-run: the run is not cancelled, but the overrun is logged and this
+ * comment is posted with `postRun: true`.
+ */
 export function buildRunLimitStopComment(input: {
   kind: RunLimitStopKind;
   runId: string;
@@ -88,6 +95,8 @@ export function buildRunLimitStopComment(input: {
   observed: number;
   limits: EffectiveRunLimits;
   lastOutputExcerpt: string | null;
+  /** The cap was found exceeded after the run ended, so nothing was cancelled. */
+  postRun?: boolean;
 }): string {
   const { limits } = input;
   const key: RunLimitKey = input.kind === "time" ? "timeoutSec" : "maxAicPerRun";
@@ -102,7 +111,9 @@ export function buildRunLimitStopComment(input: {
     : [];
   const excerpt = input.lastOutputExcerpt?.trim();
   return [
-    `Run stopped: ${what}, set at ${level} level).`,
+    input.postRun
+      ? `Run exceeded its limit after it ended: ${what}, set at ${level} level). The adapter reports cost only at run end, so the run was not stopped early.`
+      : `Run stopped: ${what}, set at ${level} level).`,
     "",
     "**Resume notes**",
     `- Run: \`${input.runId}\`; agent: ${input.agentName}; model: ${limits.model ?? "adapter default"}${limits.sources.model ? ` (from ${limits.sources.model})` : ""}.`,

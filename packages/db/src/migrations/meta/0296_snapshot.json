@@ -33436,6 +33436,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "closed_by_actor_type": {
+          "name": "closed_by_actor_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "closed_by_actor_id": {
+          "name": "closed_by_actor_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -33774,6 +33786,22 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "matching_trials_open_issue_uq": {
+          "name": "matching_trials_open_issue_uq",
+          "columns": [
+            {
+              "expression": "issue_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"matching_trials\".\"status\" = 'open'",
           "concurrently": false,
           "method": "btree",
           "with": {}

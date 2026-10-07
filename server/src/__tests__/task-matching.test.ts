@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import {
   activityLog,
@@ -123,14 +123,26 @@ describeEmbeddedPostgres("task matching (db)", () => {
     const done = await newIssue("Build login rate limiter");
     await issuesSvc.update(done.id, { assigneeAgentId: alice.id });
     await db.insert(costEvents).values({ companyId, agentId: alice.id, issueId: done.id, provider: "p", model: "m", costCents: 120, occurredAt: new Date() });
-    await issuesSvc.update(done.id, { status: "done" });
-    const cancelled = await newIssue("Build login rate limiter v2");
+    // Accepted by a board user: full weight.
+    await issuesSvc.update(done.id, { status: "done", actorUserId: "board-user" });
+    const selfClosed = await newIssue("Build login rate limiter v2");
+    await issuesSvc.update(selfClosed.id, { assigneeAgentId: bob.id });
+    await db.insert(costEvents).values({ companyId, agentId: bob.id, issueId: selfClosed.id, provider: "p", model: "m", costCents: 120, occurredAt: new Date() });
+    // Closed by the assignee itself: reduced weight.
+    await issuesSvc.update(selfClosed.id, { status: "done", actorAgentId: bob.id });
+    const cancelled = await newIssue("Build login rate limiter v3");
     await issuesSvc.update(cancelled.id, { assigneeAgentId: bob.id });
-    await issuesSvc.update(cancelled.id, { status: "cancelled" });
+    // A cancellation is not a quality signal and records nothing.
+    await issuesSvc.update(cancelled.id, { status: "cancelled", actorUserId: "board-user" });
 
     const outcomes = await db.select().from(matchingOutcomes).where(eq(matchingOutcomes.companyId, companyId));
-    expect(outcomes.map((o) => [o.agentId, o.outcome, o.source, o.aicSpent]).sort()).toEqual(
-      [[alice.id, 1, "completion", 120], [bob.id, 0, "completion", 0]].sort(),
+    expect(
+      outcomes.map((o) => [o.agentId, o.outcome, o.source, o.aicSpent, o.closedByActorType, o.closedByActorId]).sort(),
+    ).toEqual(
+      [
+        [alice.id, 1, "completion", 120, "user", "board-user"],
+        [bob.id, 0.6, "completion", 120, "agent", bob.id],
+      ].sort(),
     );
 
     const next = await newIssue("Login rate limiter for API");
@@ -183,7 +195,7 @@ describeEmbeddedPostgres("task matching (db)", () => {
 
     // Trial arms record trial outcomes only, not completion outcomes.
     const outcomes = await db.select().from(matchingOutcomes).where(eq(matchingOutcomes.trialId, trial.id));
-    expect(outcomes.map((o) => [o.agentId, o.outcome, o.aicSpent]).sort()).toEqual([[alice.id, 1, 50], [bob.id, 0, 0]].sort());
+    expect(outcomes.map((o) => [o.agentId, o.outcome, o.aicSpent]).sort()).toEqual([[alice.id, 1, 50], [bob.id, 0.4, 0]].sort());
     expect(await db.select().from(matchingOutcomes).where(eq(matchingOutcomes.source, "completion"))).toHaveLength(0);
     expect(await db.select().from(matchingTrialArms)).toHaveLength(2);
     expect((await db.select().from(matchingTrials))[0]?.decidedAt).toBeTruthy();
@@ -193,6 +205,60 @@ describeEmbeddedPostgres("task matching (db)", () => {
     expect(after.candidates[0]!.agentId).toBe(alice.id);
     expect(after.candidates[0]!.score).toBeGreaterThan(aliceBefore);
     expect(after.tieGroup).toEqual([alice.id]);
+  });
+
+  it("lets exactly one of two concurrent trial creates win", async () => {
+    const { companyId, alice, bob, newIssue } = await seed();
+    const svc = taskMatchingService(db);
+    const original = await newIssue("Concurrent trial target");
+    const actor = { actorType: "user", actorId: "board" };
+    const results = await Promise.allSettled([
+      svc.createTrial(companyId, original.id, [alice.id, bob.id], actor),
+      svc.createTrial(companyId, original.id, [alice.id, bob.id], actor),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(rejected.reason).toMatchObject({ status: 409 });
+    expect(await db.select().from(matchingTrials).where(eq(matchingTrials.issueId, original.id))).toHaveLength(1);
+    // The losing create rolled back its child issues.
+    expect(await db.select().from(issues).where(eq(issues.parentId, original.id))).toHaveLength(2);
+  });
+
+  it("rolls back a decision that fails midway and lets a retry succeed", async () => {
+    const { companyId, alice, bob, newIssue } = await seed();
+    const svc = taskMatchingService(db);
+    const original = await newIssue("Atomic decision target");
+    const actor = { actorType: "user", actorId: "board" };
+    const trial = await svc.createTrial(companyId, original.id, [alice.id, bob.id], actor);
+    const bobChild = trial.arms.find((a) => a.agentId === bob.id)!.childIssueId;
+
+    // Fail the second outcome insert, after the claim and the loser cancellation ran.
+    const realTransaction = db.transaction.bind(db);
+    const spy = vi.spyOn(db, "transaction").mockImplementationOnce(((fn: (tx: unknown) => Promise<unknown>) =>
+      realTransaction(async (tx) => {
+        const realInsert = tx.insert.bind(tx);
+        let outcomeInserts = 0;
+        (tx as { insert: unknown }).insert = ((table: unknown) => {
+          if (table === matchingOutcomes && ++outcomeInserts === 2) throw new Error("injected outcome failure");
+          return realInsert(table as never);
+        }) as never;
+        return fn(tx);
+      })) as never);
+    await expect(
+      svc.decideTrial(companyId, original.id, trial.id, { winnerAgentId: alice.id, reason: "x" }, actor),
+    ).rejects.toThrow("injected outcome failure");
+    spy.mockRestore();
+
+    const [trialRow] = await db.select().from(matchingTrials).where(eq(matchingTrials.id, trial.id));
+    expect(trialRow).toMatchObject({ status: "open", winnerAgentId: null, decidedAt: null });
+    const [bobRow] = await db.select().from(issues).where(eq(issues.id, bobChild));
+    expect(bobRow?.status).toBe("todo");
+    expect(await db.select().from(matchingOutcomes).where(eq(matchingOutcomes.trialId, trial.id))).toHaveLength(0);
+
+    const decided = await svc.decideTrial(companyId, original.id, trial.id, { winnerAgentId: alice.id, reason: "retry" }, actor);
+    expect(decided.trial.status).toBe("decided");
+    expect(decided.cancelledChildIssueIds).toEqual([bobChild]);
+    expect(await db.select().from(matchingOutcomes).where(eq(matchingOutcomes.trialId, trial.id))).toHaveLength(2);
   });
 });
 
@@ -251,6 +317,98 @@ describeEmbeddedPostgres("one task in progress and team spend attribution (db)",
       .from(activityLog)
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "agent.task_pickup_rejected")));
     expect(rejections).toHaveLength(1);
+  });
+
+  it("logs exactly one rejection per pickup the pre-check rejects", async () => {
+    const companyId = await seedCompany();
+    const agent = await agentService(db).create(companyId, { name: "Builder", adapterType: "process" });
+    const svc = issueService(db);
+    await svc.create(companyId, { title: "Held", status: "in_progress", priority: "medium", assigneeAgentId: agent.id });
+    const next = await svc.create(companyId, { title: "Next", status: "todo", priority: "medium", assigneeAgentId: agent.id });
+    await expect(svc.checkout(next.id, agent.id, ["todo"], null)).rejects.toMatchObject({ status: 409 });
+    const rejections = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "agent.task_pickup_rejected")));
+    expect(rejections).toHaveLength(1);
+  });
+
+  it("demotes duplicate in_progress tasks on import and logs each demotion", async () => {
+    const companyId = await seedCompany();
+    const agent = await agentService(db).create(companyId, { name: "Builder", adapterType: "process" });
+    const row = (title: string) => ({
+      id: randomUUID(),
+      ref: title,
+      projectId: null,
+      projectWorkspaceId: null,
+      title,
+      description: null,
+      assigneeAgentId: agent.id,
+      status: "in_progress",
+      priority: "medium",
+      billingCode: null,
+      assigneeAdapterOverrides: null,
+      executionWorkspaceSettings: null,
+      labelIds: [],
+      monitorNotes: null,
+      monitorScheduledBy: null,
+    });
+    const [first, second] = [row("First"), row("Second")];
+    const result = await issueService(db).importIssues(companyId, [first, second] as never);
+    expect(result).toEqual({ demotedInProgressCount: 1 });
+    const rows = await db.select({ id: issues.id, status: issues.status }).from(issues).where(eq(issues.companyId, companyId));
+    expect(rows.find((r) => r.id === first.id)?.status).toBe("in_progress");
+    expect(rows.find((r) => r.id === second.id)?.status).toBe("todo");
+    const logged = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, second.id), eq(activityLog.action, "issue.in_progress_demoted_by_import")));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ actorType: "system", agentId: agent.id });
+  });
+
+  it("demotes duplicate in_progress tasks in migration 0296 and clears execution ownership", async () => {
+    const companyId = await seedCompany();
+    const agent = await agentService(db).create(companyId, { name: "Builder", adapterType: "process" });
+    const svc = issueService(db);
+    const kept = await svc.create(companyId, { title: "Kept", status: "in_progress", priority: "medium", assigneeAgentId: agent.id });
+    const demoted = await svc.create(companyId, { title: "Demoted", status: "todo", priority: "medium", assigneeAgentId: agent.id });
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const migration = readFileSync(
+      fileURLToPath(new URL("../../../packages/db/src/migrations/0296_lively_dormammu.sql", import.meta.url)),
+      "utf8",
+    );
+    const statements = migration.split("--> statement-breakpoint").map((s) => s.trim());
+    const demote = statements.find((s) => s.includes("issue.in_progress_demoted_by_migration"))!;
+    const createIndex = statements.find((s) => s.startsWith('CREATE UNIQUE INDEX "issues_agent_single_in_progress_uq"'))!;
+    // Recreate the pre-migration state: no index, two in_progress rows, one with execution ownership.
+    await db.execute(sql.raw(`DROP INDEX "issues_agent_single_in_progress_uq"`));
+    try {
+      await db.execute(sql`
+        UPDATE "issues" SET "status" = 'in_progress', "started_at" = now() - interval '1 hour',
+          "execution_agent_name_key" = 'builder', "execution_locked_at" = now()
+        WHERE "id" = ${demoted.id}`);
+      await db.execute(sql`UPDATE "issues" SET "started_at" = now() WHERE "id" = ${kept.id}`);
+      await db.execute(sql.raw(demote));
+    } finally {
+      await db.execute(sql.raw(createIndex));
+    }
+    const rows = await db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(rows.find((r) => r.id === kept.id)?.status).toBe("in_progress");
+    expect(rows.find((r) => r.id === demoted.id)).toMatchObject({
+      status: "todo",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+    const logged = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityId, demoted.id), eq(activityLog.action, "issue.in_progress_demoted_by_migration")));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatchObject({ actorType: "system", companyId, agentId: agent.id });
   });
 
   it("maps a direct in_progress write that hits the index to the pickup 409", async () => {

@@ -21,8 +21,10 @@ import type {
   MatchingConfig,
   MatchingTrial,
 } from "@paperclipai/shared";
+import { isUniqueViolation } from "../db-errors.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
-import { issueService } from "./issues.js";
+import { publishActivity, type ActivityPublication } from "./activity-log.js";
+import { executeIssuePostCommitActions, issueService, type IssuePostCommitAction } from "./issues.js";
 
 /**
  * Advisory task matching. The company owns the assignment strategy: this
@@ -56,6 +58,29 @@ const SIMILAR_THRESHOLD = 0.3;
 const HISTORY_LIMIT = 2000;
 const STOP_WORDS = new Set(["the", "and", "for", "with", "from", "into", "this", "that", "add", "fix", "trial"]);
 const TRIAL_LETTERS = ["A", "B", "C"];
+const OPEN_TRIAL_INDEX = "matching_trials_open_issue_uq";
+
+/**
+ * Outcome weights. A task the assignee closes itself counts less than one
+ * someone else accepted, so an agent cannot inflate its own history by
+ * marking its work done. A trial loser did the work but was not picked, so it
+ * scores below the "good" threshold (0.5) without counting as a failure.
+ */
+export const OUTCOME_WEIGHTS = {
+  doneAccepted: 1,
+  doneSelfClosed: 0.6,
+  trialWinner: 1,
+  trialLoser: 0.4,
+} as const;
+
+/** Who made the change that produced an outcome. */
+export interface OutcomeActor {
+  actorType: string;
+  actorId: string;
+}
+
+/** Same executor surface as `db`; a transaction handle also fits. */
+type Executor = Pick<Db, "select" | "insert" | "update">;
 
 export interface TaskShape {
   projectId: string | null;
@@ -164,7 +189,7 @@ export function tieGroup(candidates: Array<{ agentId: string; score: number }>, 
   return candidates.filter((c) => top - c.score <= epsilon + 1e-9).map((c) => c.agentId);
 }
 
-async function loadTaskShape(db: Db, companyId: string, issueId: string) {
+async function loadTaskShape(db: Executor, companyId: string, issueId: string) {
   const issue = await db
     .select()
     .from(issues)
@@ -184,7 +209,7 @@ async function loadTaskShape(db: Db, companyId: string, issueId: string) {
   return { issue, shape };
 }
 
-async function aicForIssue(db: Db, companyId: string, issueId: string) {
+async function aicForIssue(db: Executor, companyId: string, issueId: string) {
   const [row] = await db
     .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::int` })
     .from(costEvents)
@@ -198,8 +223,18 @@ function wallSeconds(issue: typeof issues.$inferSelect, end: Date) {
 }
 
 async function insertOutcome(
-  db: Db,
-  input: { companyId: string; agentId: string; issueId: string; trialId: string | null; shape: TaskShape; outcome: number; source: "completion" | "trial"; issue: typeof issues.$inferSelect },
+  db: Executor,
+  input: {
+    companyId: string;
+    agentId: string;
+    issueId: string;
+    trialId: string | null;
+    shape: TaskShape;
+    outcome: number;
+    source: "completion" | "trial";
+    issue: typeof issues.$inferSelect;
+    closedBy: OutcomeActor | null;
+  },
 ) {
   await db.insert(matchingOutcomes).values({
     companyId: input.companyId,
@@ -214,21 +249,28 @@ async function insertOutcome(
     aicSpent: await aicForIssue(db, input.companyId, input.issueId),
     wallSeconds: wallSeconds(input.issue, input.issue.completedAt ?? input.issue.cancelledAt ?? new Date()),
     source: input.source,
+    closedByActorType: input.closedBy?.actorType ?? null,
+    closedByActorId: input.closedBy?.actorId ?? null,
   });
 }
 
 /**
- * Issue status hook: a task assigned to an agent that becomes done (1) or
- * cancelled (0) feeds the matching history. Trial arms are skipped because the
- * trial decision records them. Conversations are not tasks.
+ * Issue status hook: a task assigned to an agent that becomes done feeds the
+ * matching history. Done accepted by someone else (a board user, the CEO, a
+ * manager, a reviewer agent) scores 1; done closed by the assignee itself
+ * scores 0.6. A cancellation records nothing: the board or a manager cancels
+ * for many reasons other than quality, and the trial decision records trial
+ * losers itself. Trial arms are skipped because the trial decision records
+ * them. Conversations are not tasks.
  */
 export async function recordIssueCompletionOutcome(
-  db: Db,
+  db: Executor,
   before: { status: string },
   after: typeof issues.$inferSelect,
+  actor: { actorAgentId?: string | null; actorUserId?: string | null } = {},
 ) {
   if (before.status === after.status) return;
-  if (after.status !== "done" && after.status !== "cancelled") return;
+  if (after.status !== "done") return;
   if (!after.assigneeAgentId || after.conversationAgentId) return;
   const arm = await db
     .select({ id: matchingTrialArms.id })
@@ -236,6 +278,13 @@ export async function recordIssueCompletionOutcome(
     .where(eq(matchingTrialArms.childIssueId, after.id))
     .limit(1);
   if (arm.length) return;
+  const closedBy: OutcomeActor | null = actor.actorAgentId
+    ? { actorType: "agent", actorId: actor.actorAgentId }
+    : actor.actorUserId
+      ? { actorType: "user", actorId: actor.actorUserId }
+      : null;
+  // No known closer, or the assignee itself: self-closed.
+  const accepted = closedBy !== null && !(closedBy.actorType === "agent" && closedBy.actorId === after.assigneeAgentId);
   const { shape } = await loadTaskShape(db, after.companyId, after.id);
   await insertOutcome(db, {
     companyId: after.companyId,
@@ -243,13 +292,14 @@ export async function recordIssueCompletionOutcome(
     issueId: after.id,
     trialId: null,
     shape,
-    outcome: after.status === "done" ? 1 : 0,
+    outcome: accepted ? OUTCOME_WEIGHTS.doneAccepted : OUTCOME_WEIGHTS.doneSelfClosed,
     source: "completion",
     issue: after,
+    closedBy,
   });
 }
 
-async function loadTrial(db: Db, companyId: string, issueId: string, trialId: string): Promise<MatchingTrial> {
+async function loadTrial(db: Executor, companyId: string, issueId: string, trialId: string): Promise<MatchingTrial> {
   const trial = await db
     .select()
     .from(matchingTrials)
@@ -354,39 +404,53 @@ export function taskMatchingService(db: Db) {
         .from(agents)
         .where(and(eq(agents.companyId, companyId), inArray(agents.id, agentIds)));
       if (found.length !== agentIds.length) throw unprocessable("Every trial agent must belong to the company");
-      const open = await db
-        .select({ id: matchingTrials.id })
-        .from(matchingTrials)
-        .where(and(eq(matchingTrials.companyId, companyId), eq(matchingTrials.issueId, issueId), eq(matchingTrials.status, "open")))
-        .limit(1);
-      if (open.length) throw conflict("Issue already has an open matching trial", { trialId: open[0]!.id });
 
-      const trialId = await db.transaction(async (tx) => {
-        const issuesSvc = issueService(db);
-        const [trial] = await tx
-          .insert(matchingTrials)
-          .values({ companyId, issueId, createdByActorType: actor.actorType, createdByActorId: actor.actorId })
-          .returning();
-        for (const [i, agentId] of agentIds.entries()) {
-          const child = await issuesSvc.create(
-            companyId,
-            {
-              parentId: issue.id,
-              projectId: issue.projectId,
-              goalId: issue.goalId,
-              priority: issue.priority,
-              status: "todo",
-              assigneeAgentId: agentId,
-              title: `[Trial ${TRIAL_LETTERS[i]}] ${issue.title}`,
-              description: `${issue.description ?? ""}\n\n---\nThis is a parallel trial: ${agentIds.length} agents work on the same task independently. The company picks one winner; the other trial tasks are cancelled.`.trim(),
-              allowDuplicate: true,
-            },
-            tx as never,
-          );
-          await tx.insert(matchingTrialArms).values({ trialId: trial!.id, agentId, childIssueId: child.id });
-        }
-        return trial!.id;
-      });
+      const findOpen = (executor: Executor) =>
+        executor
+          .select({ id: matchingTrials.id })
+          .from(matchingTrials)
+          .where(and(eq(matchingTrials.companyId, companyId), eq(matchingTrials.issueId, issueId), eq(matchingTrials.status, "open")))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      const openConflict = (trialId: string | null) =>
+        conflict("Issue already has an open matching trial", { trialId });
+
+      // The check gives a clear error early; the partial unique index
+      // `matching_trials_open_issue_uq` closes the concurrent create race.
+      let trialId: string;
+      try {
+        trialId = await db.transaction(async (tx) => {
+          const open = await findOpen(tx);
+          if (open) throw openConflict(open.id);
+          const issuesSvc = issueService(db);
+          const [trial] = await tx
+            .insert(matchingTrials)
+            .values({ companyId, issueId, createdByActorType: actor.actorType, createdByActorId: actor.actorId })
+            .returning();
+          for (const [i, agentId] of agentIds.entries()) {
+            const child = await issuesSvc.create(
+              companyId,
+              {
+                parentId: issue.id,
+                projectId: issue.projectId,
+                goalId: issue.goalId,
+                priority: issue.priority,
+                status: "todo",
+                assigneeAgentId: agentId,
+                title: `[Trial ${TRIAL_LETTERS[i]}] ${issue.title}`,
+                description: `${issue.description ?? ""}\n\n---\nThis is a parallel trial: ${agentIds.length} agents work on the same task independently. The company picks one winner; the other trial tasks are cancelled.`.trim(),
+                allowDuplicate: true,
+              },
+              tx as never,
+            );
+            await tx.insert(matchingTrialArms).values({ trialId: trial!.id, agentId, childIssueId: child.id });
+          }
+          return trial!.id;
+        });
+      } catch (error) {
+        if (!isUniqueViolation(error, OPEN_TRIAL_INDEX)) throw error;
+        throw openConflict((await findOpen(db))?.id ?? null);
+      }
       return loadTrial(db, companyId, issueId, trialId);
     },
 
@@ -404,48 +468,66 @@ export function taskMatchingService(db: Db) {
       if (!trial.arms.some((a) => a.agentId === input.winnerAgentId)) throw unprocessable("Winner must be one of the trial agents");
       const { shape } = await loadTaskShape(db, companyId, issueId);
       const issuesSvc = issueService(db);
-      const cancelled: string[] = [];
+      const closedBy: OutcomeActor = { actorType: actor.actorType, actorId: actor.actorId };
+      const publications: ActivityPublication[] = [];
+      const postCommitActions: IssuePostCommitAction[] = [];
 
-      // Claim the decision first so two concurrent decisions cannot both win.
-      const now = new Date();
-      const claimed = await db
-        .update(matchingTrials)
-        .set({
-          status: "decided",
-          decidedAt: now,
-          winnerAgentId: input.winnerAgentId,
-          decisionReason: input.reason,
-          decidedByActorType: actor.actorType,
-          decidedByActorId: actor.actorId,
-        })
-        .where(and(eq(matchingTrials.id, trialId), eq(matchingTrials.status, "open")))
-        .returning({ id: matchingTrials.id });
-      if (!claimed.length) throw conflict("Matching trial is already decided");
+      // The claim, the loser cancellations, and the outcomes commit together:
+      // a failure anywhere leaves the trial open with nothing applied, so the
+      // decision can be retried.
+      const cancelled = await db.transaction(async (tx) => {
+        const cancelledIds: string[] = [];
+        const now = new Date();
+        const claimed = await tx
+          .update(matchingTrials)
+          .set({
+            status: "decided",
+            decidedAt: now,
+            winnerAgentId: input.winnerAgentId,
+            decisionReason: input.reason,
+            decidedByActorType: actor.actorType,
+            decidedByActorId: actor.actorId,
+          })
+          .where(and(eq(matchingTrials.id, trialId), eq(matchingTrials.status, "open")))
+          .returning({ id: matchingTrials.id });
+        // Concurrent decisions serialize on the row lock; the second sees no open row.
+        if (!claimed.length) throw conflict("Matching trial is already decided");
 
-      for (const arm of trial.arms) {
-        const won = arm.agentId === input.winnerAgentId;
-        let child = await db
-          .select()
-          .from(issues)
-          .where(and(eq(issues.id, arm.childIssueId), eq(issues.companyId, companyId)))
-          .then((rows) => rows[0] ?? null);
-        if (!child) continue;
-        if (!won && child.status !== "done" && child.status !== "cancelled") {
-          const updated = await issuesSvc.update(child.id, { status: "cancelled", companyGuard: companyId });
-          if (updated) child = updated as typeof child;
-          cancelled.push(child.id);
+        for (const arm of trial.arms) {
+          const won = arm.agentId === input.winnerAgentId;
+          let child = await tx
+            .select()
+            .from(issues)
+            .where(and(eq(issues.id, arm.childIssueId), eq(issues.companyId, companyId)))
+            .then((rows) => rows[0] ?? null);
+          if (!child) continue;
+          if (!won && child.status !== "done" && child.status !== "cancelled") {
+            const updated = await issuesSvc.update(
+              child.id,
+              { status: "cancelled", companyGuard: companyId },
+              tx,
+              publications,
+              postCommitActions,
+            );
+            if (updated) child = updated as typeof child;
+            cancelledIds.push(child.id);
+          }
+          await insertOutcome(tx, {
+            companyId,
+            agentId: arm.agentId,
+            issueId: child.id,
+            trialId,
+            shape,
+            outcome: won ? OUTCOME_WEIGHTS.trialWinner : OUTCOME_WEIGHTS.trialLoser,
+            source: "trial",
+            issue: child,
+            closedBy,
+          });
         }
-        await insertOutcome(db, {
-          companyId,
-          agentId: arm.agentId,
-          issueId: child.id,
-          trialId,
-          shape,
-          outcome: won ? 1 : 0,
-          source: "trial",
-          issue: child,
-        });
-      }
+        return cancelledIds;
+      });
+      for (const publication of publications) publishActivity(publication);
+      await executeIssuePostCommitActions(db, postCommitActions);
       return { trial: await loadTrial(db, companyId, issueId, trialId), cancelledChildIssueIds: cancelled };
     },
   };

@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { doublePrecision, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -23,6 +24,8 @@ export const matchingTrials = pgTable(
   },
   (table) => ({
     companyIssueIdx: index("matching_trials_company_issue_idx").on(table.companyId, table.issueId),
+    /** At most one open trial per issue; closes the concurrent create race. */
+    openIssueUq: uniqueIndex("matching_trials_open_issue_uq").on(table.issueId).where(sql`${table.status} = 'open'`),
   }),
 );
 
@@ -57,12 +60,18 @@ export const matchingOutcomes = pgTable(
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     labels: jsonb("labels").$type<string[]>().notNull().default([]),
     titleTokens: jsonb("title_tokens").$type<string[]>().notNull().default([]),
-    /** 1 = done or trial winner, 0 = cancelled or trial loser. */
+    /**
+     * 1 = done accepted by someone else or trial winner, 0.6 = done closed by
+     * the assignee itself, 0.4 = trial loser, 0 = cancelled.
+     */
     outcome: doublePrecision("outcome").notNull(),
     /** AIC spent on the issue (1 AIC = 1 cost cent). */
     aicSpent: integer("aic_spent").notNull().default(0),
     wallSeconds: integer("wall_seconds"),
     source: text("source").$type<"completion" | "trial">().notNull(),
+    /** Who closed the issue (done/cancelled) or decided the trial. */
+    closedByActorType: text("closed_by_actor_type"),
+    closedByActorId: text("closed_by_actor_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

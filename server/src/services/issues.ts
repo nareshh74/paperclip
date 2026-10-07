@@ -10386,11 +10386,12 @@ export function issueService(db: Db) {
     importIssues: async (
       companyId: string,
       rows: ImportIssueRow[],
-    ): Promise<void> => {
-      if (rows.length === 0) return;
+    ): Promise<{ demotedInProgressCount: number }> => {
+      if (rows.length === 0) return { demotedInProgressCount: 0 };
       const isolatedWorkspacesEnabled = (
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
+      const demotionPublications: ActivityPublication[] = [];
       await db.transaction(async (tx) => {
         // Self-correcting counter: seed from max(issue_number) so a drifted
         // company counter cannot mint colliding identifiers, then reserve the
@@ -10494,6 +10495,7 @@ export function issueService(db: Db) {
 
         let counter = base;
         let agentsInProgress: Set<string | null> | null = null;
+        const demotedIssueIds: Array<{ id: string; agentId: string }> = [];
         for (let row of rows) {
           await assertExecutionTaskParent(tx as unknown as Db, companyId, row.parentId);
           counter += 1;
@@ -10533,8 +10535,12 @@ export function issueService(db: Db) {
                 ).map((r) => r.agentId),
               );
             }
-            if (agentsInProgress.has(row.assigneeAgentId)) row = { ...row, status: "todo" };
-            else agentsInProgress.add(row.assigneeAgentId);
+            if (agentsInProgress.has(row.assigneeAgentId)) {
+              // Imported rows carry no checkout or execution ownership, so the
+              // status is the only field to reset. Log each demotion.
+              row = { ...row, status: "todo" };
+              demotedIssueIds.push({ id: row.id, agentId: row.assigneeAgentId! });
+            } else agentsInProgress.add(row.assigneeAgentId);
           }
 
           const projectId = row.projectId ?? null;
@@ -10620,7 +10626,22 @@ export function issueService(db: Db) {
 
         await insertRowsInChunks(tx, issues, issueRows);
         await insertRowsInChunks(tx, issueLabels, labelRows);
+        for (const demoted of demotedIssueIds) {
+          const { publication } = await persistActivity(tx as unknown as Db, {
+            companyId,
+            actorType: "system",
+            actorId: "company_import",
+            agentId: demoted.agentId,
+            action: "issue.in_progress_demoted_by_import",
+            entityType: "issue",
+            entityId: demoted.id,
+            details: { fromStatus: "in_progress", toStatus: "todo", reason: "one_task_in_progress" },
+          });
+          demotionPublications.push(publication);
+        }
       });
+      for (const publication of demotionPublications) publishActivity(publication);
+      return { demotedInProgressCount: demotionPublications.length };
     },
 
     /**
@@ -11141,7 +11162,7 @@ export function issueService(db: Db) {
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
         await recordChatCompletion(tx, receiptExisting, updated);
-        await recordIssueCompletionOutcome(tx, receiptExisting, updated);
+        await recordIssueCompletionOutcome(tx, receiptExisting, updated, { actorAgentId, actorUserId });
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
         if (actorUserId && issueData.status !== undefined) {

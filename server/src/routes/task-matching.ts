@@ -1,26 +1,64 @@
 import { Router, type Request } from "express";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { teams } from "@paperclipai/db";
+import { agents, issues, teamProjects, teams } from "@paperclipai/db";
 import {
   createMatchingTrialSchema,
   decideMatchingTrialSchema,
   matchCandidatesQuerySchema,
 } from "@paperclipai/shared";
-import { badRequest } from "../errors.js";
+import { badRequest, forbidden, notFound } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { logActivity } from "../services/index.js";
 import { taskMatchingService } from "../services/task-matching.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
-import { assertBoardCeoOrTeamManager } from "./teams.js";
 
-/** Trials spend company capacity: board, the CEO agent, or any team manager. */
-async function assertCanRunTrials(db: Db, req: Request, companyId: string) {
-  const managers = await db
-    .select({ id: teams.managerAgentId })
-    .from(teams)
-    .where(and(eq(teams.companyId, companyId), isNotNull(teams.managerAgentId)));
-  await assertBoardCeoOrTeamManager(db, req, companyId, managers.map((m) => m.id));
+/**
+ * Trials spend company capacity. The board and the CEO agent may run trials on
+ * any issue. A team manager may run them only on issues whose project is linked
+ * to a team they manage, and only with agents from those teams.
+ */
+async function assertCanRunTrials(db: Db, req: Request, companyId: string, issueId: string, armAgentIds?: string[]) {
+  if (req.actor.type === "board") return;
+  const actorId = req.actor.type === "agent" ? req.actor.agentId : null;
+  const actor = actorId
+    ? await db
+        .select({ role: agents.role })
+        .from(agents)
+        .where(and(eq(agents.companyId, companyId), eq(agents.id, actorId)))
+        .then((rows) => rows[0] ?? null)
+    : null;
+  if (!actorId || !actor) throw forbidden("Board, CEO, or linked team manager access required");
+  if (actor.role === "ceo") return;
+  const issue = await db
+    .select({ projectId: issues.projectId })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+    .then((rows) => rows[0] ?? null);
+  if (!issue) throw notFound("Issue not found");
+  const managed = issue.projectId
+    ? await db
+        .select({ teamId: teams.id })
+        .from(teams)
+        .innerJoin(teamProjects, eq(teamProjects.teamId, teams.id))
+        .where(
+          and(
+            eq(teams.companyId, companyId),
+            eq(teams.managerAgentId, actorId),
+            eq(teamProjects.projectId, issue.projectId),
+          ),
+        )
+    : [];
+  if (managed.length === 0) throw forbidden("Board, CEO, or linked team manager access required");
+  if (!armAgentIds?.length) return;
+  const teamIds = managed.map((m) => m.teamId);
+  const arms = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), inArray(agents.id, armAgentIds), inArray(agents.teamId, teamIds)));
+  if (arms.length !== new Set(armAgentIds).size) {
+    throw forbidden("A team manager may only run trials with agents from their own team");
+  }
 }
 
 export function taskMatchingRoutes(db: Db) {
@@ -55,7 +93,7 @@ export function taskMatchingRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     const issueId = req.params.issueId as string;
     assertCompanyAccess(req, companyId);
-    await assertCanRunTrials(db, req, companyId);
+    await assertCanRunTrials(db, req, companyId, issueId, req.body.agentIds);
     const actor = getActorInfo(req);
     const trial = await svc.createTrial(companyId, issueId, req.body.agentIds, actor);
     await log(req, companyId, "issue.match_trial_created", issueId, { trialId: trial.id, arms: trial.arms });
@@ -75,7 +113,7 @@ export function taskMatchingRoutes(db: Db) {
       const companyId = req.params.companyId as string;
       const issueId = req.params.issueId as string;
       assertCompanyAccess(req, companyId);
-      await assertCanRunTrials(db, req, companyId);
+      await assertCanRunTrials(db, req, companyId, issueId);
       const actor = getActorInfo(req);
       const result = await svc.decideTrial(companyId, issueId, req.params.trialId as string, req.body, actor);
       await log(req, companyId, "issue.match_trial_decided", issueId, {

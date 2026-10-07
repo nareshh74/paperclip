@@ -51,7 +51,7 @@ const issueSvc = {
   getRelationSummaries: vi.fn(),
   listAttachments: vi.fn(),
   createAttachment: vi.fn(),
-  importIssues: vi.fn(),
+  importIssues: vi.fn(async () => ({ demotedInProgressCount: 0 })),
   archiveImportedInbox: vi.fn(),
   addImportedComments: vi.fn(),
   addImportedAttachments: vi.fn(),

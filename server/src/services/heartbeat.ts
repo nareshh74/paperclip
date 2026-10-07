@@ -23237,7 +23237,11 @@ export function heartbeatService(
           : `AIC cap reached (${observed} of ${limit} AIC)`;
         // The adapter may already be finishing; do not report a stop for a run that ended.
         const current = await getRun(run.id);
-        if (!current || current.status !== "running") return;
+        if (!current || current.status !== "running") {
+          // Nothing was stopped, so let the post-run AIC check report the overrun.
+          runLimitStopTriggered = false;
+          return;
+        }
         try {
           await appendRunEvent(run, {
             eventType: isTime ? "run.time_limit_exceeded" : "run.aic_cap_exceeded",
@@ -23286,6 +23290,9 @@ export function heartbeatService(
       }
       if (runLimits.maxAicPerRun) {
         // 1 AIC = 1 cost cent. Cost events for this run are summed while it is live.
+        // Mid-run enforcement only works for adapters that stream cost events
+        // during the run. Adapters that report cost only at run end are checked
+        // after the run instead (see the post-run AIC check below).
         const aicCap = runLimits.maxAicPerRun;
         let aicCheckInFlight = false;
         runAicPollTimer = setInterval(() => {
@@ -23297,7 +23304,8 @@ export function heartbeatService(
             .where(and(eq(costEvents.companyId, agent.companyId), eq(costEvents.heartbeatRunId, run.id)))
             .then(([row]) => {
               const aic = Number(row?.total ?? 0);
-              if (aic > aicCap) fireRunLimitStop("aic", aic);
+              // A run that reaches the cap stops; the cap is the most it may spend.
+              if (aic >= aicCap) fireRunLimitStop("aic", aic);
             })
             .catch((err) => logger.warn({ err, runId: run.id }, "failed to read run AIC"))
             .finally(() => {
@@ -26066,6 +26074,50 @@ export function heartbeatService(
             },
             normalizedUsage,
           );
+          // Post-run AIC check for adapters that report cost only at run end:
+          // the run already finished, so record the overrun and leave resume
+          // notes instead of cancelling.
+          if (runLimits.maxAicPerRun && !runLimitStopTriggered) {
+            const [aicRow] = await db
+              .select({ total: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision` })
+              .from(costEvents)
+              .where(and(eq(costEvents.companyId, agent.companyId), eq(costEvents.heartbeatRunId, run.id)));
+            const aic = Number(aicRow?.total ?? 0);
+            if (aic >= runLimits.maxAicPerRun) {
+              await appendRunEvent(finalizedRun, {
+                eventType: "run.aic_cap_exceeded",
+                stream: "system",
+                level: "warn",
+                message: `AIC cap reached after the run ended (${aic} of ${runLimits.maxAicPerRun} AIC)`,
+                payload: { observed: aic, postRun: true, ...runLimits },
+              });
+              await db
+                .update(heartbeatRuns)
+                .set({
+                  resultJson: {
+                    ...parseObject(finalizedRun.resultJson),
+                    runLimitExceeded: { kind: "aic", observed: aic, postRun: true, ...runLimits },
+                  },
+                  updatedAt: new Date(),
+                })
+                .where(eq(heartbeatRuns.id, run.id));
+              if (issueId) {
+                await issuesSvc.addComment(
+                  issueId,
+                  buildRunLimitStopComment({
+                    kind: "aic",
+                    runId: run.id,
+                    agentName: agent.name,
+                    observed: aic,
+                    limits: runLimits,
+                    lastOutputExcerpt: stdoutExcerpt,
+                    postRun: true,
+                  }),
+                  { agentId: agent.id, runId: run.id },
+                );
+              }
+            }
+          }
           if (taskKey) {
             if (
               adapterResult.clearSession ||

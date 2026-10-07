@@ -96,7 +96,7 @@ import {
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { ONBOARDING_FIRST_TASK_SKILL_KEY, PAPERCLIP_CORE_SKILL_KEYS } from "../services/company-skills.js";
 import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
-import { assertBoardCeoOrTeamManager } from "./teams.js";
+import { assertBoardCeoOrTeamManager, assertCanChangeTeamMembership } from "./teams.js";
 import { teamService } from "../services/teams.js";
 import { assertAuthenticated, assertBoard, assertCompanyAccess, assertInstanceAdmin, buildActorSecretContext, getAccessibleResource, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { runAdapterLoginStartSpine } from "./adapter-login-route-spine.js";
@@ -4828,6 +4828,11 @@ export function agentRoutes(
       onboardingFirstAgent: createOnboardingFirstAgent,
       ...createInput
     } = req.body;
+    if (createInput.teamId) {
+      // Creating an agent directly into a team needs the board, the CEO, or that team's manager.
+      const managerAgentId = await teamService(db).assertTeamInCompany(companyId, createInput.teamId);
+      await assertBoardCeoOrTeamManager(db, req, companyId, [managerAgentId]);
+    }
     createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
@@ -5429,13 +5434,14 @@ export function agentRoutes(
       return;
     }
     if (hasOwn(req.body as object, "teamId") && (req.body as { teamId?: string | null }).teamId !== existing.teamId) {
-      // Moving an agent between teams needs the manager of every team touched, the CEO, or the board.
-      const teams = teamService(db);
-      for (const teamId of [existing.teamId, (req.body as { teamId?: string | null }).teamId]) {
-        if (!teamId) continue;
-        const managerAgentId = await teams.assertTeamInCompany(existing.companyId, teamId);
-        await assertBoardCeoOrTeamManager(db, req, existing.companyId, [managerAgentId]);
-      }
+      await assertCanChangeTeamMembership(
+        db,
+        req,
+        existing.companyId,
+        existing,
+        existing.teamId,
+        (req.body as { teamId?: string | null }).teamId,
+      );
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };

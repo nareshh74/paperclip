@@ -42,6 +42,8 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
   const capturedConfigs: Array<Record<string, unknown>> = [];
   let messagesEmitted = 0;
   let recordAic = false;
+  /** When set, the adapter does no work and reports this much AIC only when it returns. */
+  let endOfRunAic: number | null = null;
   const defaultAicPollMs = runLimitTiming.aicPollIntervalMs;
 
   beforeAll(async () => {
@@ -58,6 +60,18 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
       execute: async (ctx) => {
         capturedConfigs.push(ctx.config);
         await ctx.onCancellationReady?.();
+        if (endOfRunAic !== null) {
+          await db.insert(costEvents).values({
+            companyId: ctx.agent.companyId,
+            agentId: ctx.agent.id,
+            heartbeatRunId: ctx.runId,
+            provider: "pilot",
+            model: "test",
+            costCents: endOfRunAic,
+            occurredAt: new Date(),
+          });
+          return { exitCode: 0, signal: null, timedOut: false };
+        }
         // Record 100 AIC (cents) per step for this run, like the pilot bridge does, until aborted.
         for (let i = 0; i < 200 && !ctx.signal?.aborted; i += 1) {
           messagesEmitted += 1;
@@ -90,6 +104,8 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
     capturedConfigs.length = 0;
     messagesEmitted = 0;
     recordAic = false;
+    endOfRunAic = null;
+    runLimitTiming.aicPollIntervalMs = 100;
     // Post-cancel finalization may still be writing; retry a deadlocked truncate.
     for (let attempt = 0; ; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -193,6 +209,68 @@ describeEmbeddedPostgres("heartbeat scoped run limits", () => {
     expect(capComment?.body).toContain("asked for more than the company ceiling");
     expect(capComment?.body).toContain("Next actions");
     expect(capComment?.body).toContain("team-model (from team)");
+  }, 30_000);
+
+  it("flags a run that reaches the AIC cap only at run end without cancelling it", async () => {
+    endOfRunAic = 300;
+    // Keep the live poll out of the way: this adapter reports cost only when it returns.
+    runLimitTiming.aicPollIntervalMs = 60_000;
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await db
+      .insert(authUsers)
+      .values({ id: "responsible-user", name: "Owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+      // Exactly at the cap: reaching the cap counts as exceeding it.
+      runLimits: { maxAicPerRun: 300 },
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Builder",
+      role: "engineer",
+      status: "idle",
+      adapterType: TEST_ADAPTER_TYPE,
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Quick task",
+      status: "todo",
+      priority: "medium",
+      responsibleUserId: "responsible-user",
+      assigneeAgentId: agentId,
+      issueNumber: 1,
+      identifier: `${issuePrefix}-1`,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const run = await heartbeat.invoke(agentId, "on_demand", { issueId, taskId: issueId }, "manual");
+    await waitForRunToFinish(heartbeat, run!.id);
+    // The post-run check runs after the terminal status write; wait for its comment.
+    let capComment: { body: string } | undefined;
+    for (let i = 0; i < 100 && !capComment; i += 1) {
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      capComment = comments.find((comment) => comment.body.includes("AIC cap reached"));
+      if (!capComment) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const finished = await heartbeat.getRun(run!.id);
+    expect(finished?.status).toBe("succeeded");
+    expect(finished?.errorCode).not.toBe(RUN_AIC_CAP_ERROR_CODE);
+    expect((finished?.resultJson as Record<string, unknown>)?.runLimitExceeded).toMatchObject({ kind: "aic", observed: 300, postRun: true });
+    expect(capComment?.body).toContain("after it ended");
+    expect(capComment?.body).toContain("Next actions");
   }, 30_000);
 
   it("stops the run at the team time limit with resume notes", async () => {

@@ -11,6 +11,7 @@ import {
 import { forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { logActivity, teamService } from "../services/index.js";
+import type { ReportsToChange } from "../services/teams.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
 /** Role of the calling agent, or null for non-agent actors. */
@@ -44,6 +45,35 @@ export async function assertBoardCeoOrTeamManager(
   throw forbidden("Board, CEO, or team manager access required");
 }
 
+/**
+ * Team membership change for one agent.
+ * - Only the board may move the CEO agent.
+ * - Joining from no team or leaving to no team needs the board or the CEO.
+ * - Moving between two teams needs the manager of both teams, the CEO, or the board.
+ */
+export async function assertCanChangeTeamMembership(
+  db: Db,
+  req: Request,
+  companyId: string,
+  target: { role: string | null } | null,
+  fromTeamId: string | null | undefined,
+  toTeamId: string | null | undefined,
+) {
+  if (target?.role === "ceo" && req.actor.type !== "board") {
+    throw forbidden("Only the board can change the CEO's team");
+  }
+  const svc = teamService(db);
+  const managerIds: Array<string | null> = [];
+  for (const teamId of [fromTeamId, toTeamId]) {
+    if (teamId) managerIds.push(await svc.assertTeamInCompany(companyId, teamId));
+  }
+  if (!fromTeamId || !toTeamId) {
+    await assertBoardOrCeo(db, req, companyId);
+    return;
+  }
+  for (const managerId of managerIds) await assertBoardCeoOrTeamManager(db, req, companyId, [managerId]);
+}
+
 export function teamRoutes(db: Db) {
   const router = Router();
   const svc = teamService(db);
@@ -69,6 +99,23 @@ export function teamRoutes(db: Db) {
       entityId,
       details,
     });
+  }
+
+  async function logReportsToChanges(
+    req: Request,
+    companyId: string,
+    teamId: string,
+    reason: string,
+    changes: ReportsToChange[],
+  ) {
+    for (const change of changes) {
+      await log(req, companyId, "agent.reports_to_reset", "agent", change.agentId, {
+        reason,
+        teamId,
+        fromReportsTo: change.fromReportsTo,
+        toReportsTo: change.toReportsTo,
+      });
+    }
   }
 
   router.get("/companies/:companyId/teams", async (req, res) => {
@@ -102,8 +149,9 @@ export function teamRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     await assertBoardOrCeo(db, req, companyId);
-    const team = await svc.update(companyId, req.params.teamId as string, req.body);
+    const { reportsToChanges, ...team } = await svc.update(companyId, req.params.teamId as string, req.body);
     await log(req, companyId, "team.updated", "team", team.id, { changes: req.body });
+    await logReportsToChanges(req, companyId, team.id, "manager_changed", reportsToChanges);
     res.json(team);
   });
 
@@ -111,8 +159,9 @@ export function teamRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     await assertBoardOrCeo(db, req, companyId);
-    const team = await svc.remove(companyId, req.params.teamId as string);
+    const { reportsToChanges, ...team } = await svc.remove(companyId, req.params.teamId as string);
     await log(req, companyId, "team.deleted", "team", team.id, { name: team.name });
+    await logReportsToChanges(req, companyId, team.id, "team_deleted", reportsToChanges);
     res.status(204).end();
   });
 

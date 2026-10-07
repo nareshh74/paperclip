@@ -2,12 +2,14 @@ import { and, asc, desc, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, projectPmHandoffs, projects, teamProjects, teams } from "@paperclipai/db";
 import type { CreateTeam, UpdateTeam } from "@paperclipai/shared";
+import { isUniqueViolation } from "../db-errors.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
 
-// Drizzle wraps the driver error, so check the cause as well.
-function isUniqueViolation(error: unknown) {
-  const candidate = error as { code?: unknown; cause?: { code?: unknown } } | null;
-  return candidate?.code === "23505" || candidate?.cause?.code === "23505";
+/** One member whose reportsTo changed because of a team change. */
+export interface ReportsToChange {
+  agentId: string;
+  fromReportsTo: string | null;
+  toReportsTo: string | null;
 }
 
 export function teamService(db: Db) {
@@ -40,13 +42,24 @@ export function teamService(db: Db) {
     return row;
   }
 
-  /** Members (other than the manager) report to the team manager. */
-  async function syncMembersToManager(companyId: string, teamId: string, managerAgentId: string | null) {
-    if (!managerAgentId) return;
+  /** Members (other than the manager) report to the team manager. Returns the members that changed. */
+  async function syncMembersToManager(
+    companyId: string,
+    teamId: string,
+    managerAgentId: string | null,
+  ): Promise<ReportsToChange[]> {
+    if (!managerAgentId) return [];
+    const members = await db
+      .select({ id: agents.id, reportsTo: agents.reportsTo })
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), eq(agents.teamId, teamId), ne(agents.id, managerAgentId)));
+    const changed = members.filter((m) => m.reportsTo !== managerAgentId);
+    if (changed.length === 0) return [];
     await db
       .update(agents)
       .set({ reportsTo: managerAgentId, updatedAt: new Date() })
-      .where(and(eq(agents.companyId, companyId), eq(agents.teamId, teamId), ne(agents.id, managerAgentId)));
+      .where(and(eq(agents.companyId, companyId), inArray(agents.id, changed.map((m) => m.id))));
+    return changed.map((m) => ({ agentId: m.id, fromReportsTo: m.reportsTo, toReportsTo: managerAgentId }));
   }
 
   async function listProjectIds(companyId: string, teamIds: string[]) {
@@ -104,8 +117,10 @@ export function teamService(db: Db) {
           .set({ ...data, updatedAt: new Date() })
           .where(and(eq(teams.companyId, companyId), eq(teams.id, teamId)))
           .returning();
-        if (data.managerAgentId) await syncMembersToManager(companyId, teamId, data.managerAgentId);
-        return row!;
+        const reportsToChanges = data.managerAgentId
+          ? await syncMembersToManager(companyId, teamId, data.managerAgentId)
+          : [];
+        return { ...row!, reportsToChanges };
       } catch (error) {
         if (isUniqueViolation(error)) throw conflict("A team with this name already exists");
         throw error;
@@ -115,8 +130,32 @@ export function teamService(db: Db) {
     remove: async (companyId: string, teamId: string) => {
       const row = await getById(companyId, teamId);
       // FK is ON DELETE SET NULL, so member agents fall back to company limits.
-      await db.delete(teams).where(and(eq(teams.companyId, companyId), eq(teams.id, teamId)));
-      return row;
+      // Members that reported to the team manager report to the CEO instead,
+      // the same as an agent that leaves a team.
+      return db.transaction(async (tx) => {
+        const ceo = await tx
+          .select({ id: agents.id })
+          .from(agents)
+          .where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")))
+          .then((rows) => rows[0] ?? null);
+        const members = await tx
+          .select({ id: agents.id, reportsTo: agents.reportsTo })
+          .from(agents)
+          .where(and(eq(agents.companyId, companyId), eq(agents.teamId, teamId)));
+        const reportsToChanges: ReportsToChange[] = [];
+        for (const member of members) {
+          if (!ceo || member.id === ceo.id || member.reportsTo === ceo.id) continue;
+          // The manager keeps its own reportsTo; only members that reported to the manager move.
+          if (row.managerAgentId && member.id === row.managerAgentId) continue;
+          await tx
+            .update(agents)
+            .set({ reportsTo: ceo.id, updatedAt: new Date() })
+            .where(and(eq(agents.companyId, companyId), eq(agents.id, member.id)));
+          reportsToChanges.push({ agentId: member.id, fromReportsTo: member.reportsTo, toReportsTo: ceo.id });
+        }
+        await tx.delete(teams).where(and(eq(teams.companyId, companyId), eq(teams.id, teamId)));
+        return { ...row, reportsToChanges };
+      });
     },
 
     /** Throws 422 unless the team exists in the same company. Returns the team manager id. */

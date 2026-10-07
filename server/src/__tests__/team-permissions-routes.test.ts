@@ -3,11 +3,12 @@ import express from "express";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, projects } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, issues, projects } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { agentRoutes } from "../routes/agents.js";
 import { costRoutes } from "../routes/costs.js";
+import { taskMatchingRoutes } from "../routes/task-matching.js";
 import { teamRoutes } from "../routes/teams.js";
 import { teamService } from "../services/teams.js";
 
@@ -32,6 +33,7 @@ function createApp(db: Db, actor: Actor) {
   app.use("/api", teamRoutes(db));
   app.use("/api", costRoutes(db));
   app.use("/api", agentRoutes(db));
+  app.use("/api", taskMatchingRoutes(db));
   app.use(errorHandler);
   return app;
 }
@@ -48,6 +50,7 @@ describeEmbeddedPostgres("team permission routes", () => {
   afterEach(async () => {
     await db.execute(sql.raw(`
       TRUNCATE TABLE "activity_log", "budget_policies", "budget_incidents", "project_pm_handoffs",
+        "matching_outcomes", "matching_trial_arms", "matching_trials", "issues",
         "team_projects", "projects", "agents", "teams", "companies"
       RESTART IDENTITY CASCADE
     `));
@@ -145,15 +148,53 @@ describeEmbeddedPostgres("team permission routes", () => {
   });
 
   describe("team membership through agent PATCH teamId", () => {
-    it("allows the team manager to add and remove a member", async () => {
+    it("allows the CEO and the board to move a no-team agent into a team and out again", async () => {
+      const org = await seedOrg();
+      for (const actor of [board, agentActor(org.companyId, org.ceo.id)]) {
+        const app = createApp(db, actor);
+        const joined = await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id });
+        expect(joined.status).toBe(200);
+        expect(joined.body).toMatchObject({ teamId: org.team.id, reportsTo: org.manager.id });
+        const left = await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: null });
+        expect(left.status).toBe(200);
+        expect(left.body.teamId).toBeNull();
+      }
+    });
+
+    it("rejects a team manager pulling in a no-team agent or removing a member to no team", async () => {
       const org = await seedOrg();
       const app = createApp(db, agentActor(org.companyId, org.manager.id));
-      const joined = await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id });
-      expect(joined.status).toBe(200);
-      expect(joined.body).toMatchObject({ teamId: org.team.id, reportsTo: org.manager.id });
-      const left = await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: null });
-      expect(left.status).toBe(200);
-      expect(left.body.teamId).toBeNull();
+      expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id })).status).toBe(403);
+      await db.update(agents).set({ teamId: org.team.id }).where(eq(agents.id, org.engineer.id));
+      expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: null })).status).toBe(403);
+      const row = await db.select().from(agents).where(eq(agents.id, org.engineer.id)).then((rows) => rows[0]!);
+      expect(row.teamId).toBe(org.team.id);
+    });
+
+    it("lets a manager of both teams move a member between them", async () => {
+      const org = await seedOrg();
+      await teamService(db).update(org.companyId, org.otherTeam.id, { managerAgentId: org.manager.id });
+      await db.update(agents).set({ teamId: org.otherTeam.id }).where(eq(agents.id, org.engineer.id));
+      const res = await request(createApp(db, agentActor(org.companyId, org.manager.id)))
+        .patch(`/api/agents/${org.engineer.id}`)
+        .send({ teamId: org.team.id });
+      expect(res.status).toBe(200);
+      expect(res.body.teamId).toBe(org.team.id);
+    });
+
+    it("lets only the board change the CEO's team", async () => {
+      const org = await seedOrg();
+      for (const agentId of [org.manager.id, org.ceo.id]) {
+        const res = await request(createApp(db, agentActor(org.companyId, agentId)))
+          .patch(`/api/agents/${org.ceo.id}`)
+          .send({ teamId: org.team.id });
+        expect(res.status).toBe(403);
+      }
+      // A team with no manager, so the CEO joining it does not create a reporting cycle.
+      const leaderless = await teamService(db).create(org.companyId, { name: "Leaderless" });
+      const byBoard = await request(createApp(db, board)).patch(`/api/agents/${org.ceo.id}`).send({ teamId: leaderless.id });
+      expect(byBoard.status).toBe(200);
+      expect(byBoard.body.teamId).toBe(leaderless.id);
     });
 
     it("rejects an unrelated team manager with 403", async () => {
@@ -200,6 +241,130 @@ describeEmbeddedPostgres("team permission routes", () => {
       const left = await request(app).patch(`/api/agents/${engineer.id}`).send({ teamId: null });
       expect(left.status).toBe(200);
       expect(left.body).toMatchObject({ teamId: null, reportsTo: manager.id });
+    });
+  });
+
+  describe("agent create with teamId", () => {
+    const body = (teamId: string) => ({ name: `Hire ${randomUUID().slice(0, 6)}`, role: "engineer", adapterType: "process", adapterConfig: {}, teamId });
+    async function allowCreate(agentId: string) {
+      await db
+        .update(agents)
+        .set({ permissions: { canCreateAgents: true } })
+        .where(eq(agents.id, agentId));
+    }
+
+    it("rejects an unrelated manager and allows the team manager", async () => {
+      const org = await seedOrg();
+      await allowCreate(org.otherManager.id);
+      await allowCreate(org.manager.id);
+      const denied = await request(createApp(db, agentActor(org.companyId, org.otherManager.id)))
+        .post(`/api/companies/${org.companyId}/agents`)
+        .send(body(org.team.id));
+      expect(denied.status).toBe(403);
+      const allowed = await request(createApp(db, agentActor(org.companyId, org.manager.id)))
+        .post(`/api/companies/${org.companyId}/agents`)
+        .send(body(org.team.id));
+      expect(allowed.status).toBe(201);
+      expect(allowed.body).toMatchObject({ teamId: org.team.id, reportsTo: org.manager.id });
+    });
+  });
+
+  describe("team deletion and manager change", () => {
+    it("resets members to the CEO on delete and logs each reset", async () => {
+      const org = await seedOrg();
+      const app = createApp(db, board);
+      await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id });
+      await request(app).patch(`/api/agents/${org.pm.id}`).send({ teamId: org.team.id });
+      expect((await request(app).delete(`/api/companies/${org.companyId}/teams/${org.team.id}`)).status).toBe(204);
+      const rows = await db.select().from(agents).where(eq(agents.companyId, org.companyId));
+      for (const id of [org.engineer.id, org.pm.id]) {
+        expect(rows.find((r) => r.id === id)).toMatchObject({ teamId: null, reportsTo: org.ceo.id });
+      }
+      const logged = await db
+        .select()
+        .from(activityLog)
+        .where(and(eq(activityLog.action, "agent.reports_to_reset"), eq(activityLog.companyId, org.companyId)));
+      expect(logged.map((l) => l.entityId).sort()).toEqual([org.engineer.id, org.pm.id].sort());
+      expect(logged[0]!.details).toMatchObject({ reason: "team_deleted", fromReportsTo: org.manager.id, toReportsTo: org.ceo.id });
+    });
+
+    it("logs one reset per member whose reportsTo changes with a new manager", async () => {
+      const org = await seedOrg();
+      const app = createApp(db, board);
+      await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id });
+      await request(app).patch(`/api/agents/${org.pm.id}`).send({ teamId: org.team.id });
+      const res = await request(app)
+        .patch(`/api/companies/${org.companyId}/teams/${org.team.id}`)
+        .send({ managerAgentId: org.otherManager.id });
+      expect(res.status).toBe(200);
+      expect(res.body.reportsToChanges).toBeUndefined();
+      const logged = await db
+        .select()
+        .from(activityLog)
+        .where(
+          and(
+            eq(activityLog.action, "agent.reports_to_reset"),
+            eq(activityLog.companyId, org.companyId),
+          ),
+        );
+      const managerChanged = logged.filter((l) => (l.details as { reason?: string }).reason === "manager_changed");
+      expect(managerChanged.map((l) => l.entityId).sort()).toEqual([org.engineer.id, org.pm.id].sort());
+      expect(managerChanged[0]!.details).toMatchObject({ fromReportsTo: org.manager.id, toReportsTo: org.otherManager.id });
+    });
+  });
+
+  describe("task matching trial permissions", () => {
+    async function seedTrialOrg() {
+      const org = await seedOrg();
+      await teamService(db).linkProject(org.companyId, org.team.id, org.project.id);
+      const mine1 = await seedAgent(org.companyId, "Mine One", "engineer", { teamId: org.team.id });
+      const mine2 = await seedAgent(org.companyId, "Mine Two", "engineer", { teamId: org.team.id });
+      const theirs = await seedAgent(org.companyId, "Theirs", "engineer", { teamId: org.otherTeam.id });
+      const [issue] = await db
+        .insert(issues)
+        .values({
+          companyId: org.companyId,
+          projectId: org.project.id,
+          title: "Trial target",
+          status: "todo",
+          priority: "medium",
+          issueNumber: 1,
+          identifier: `TR-${randomUUID().slice(0, 4)}`,
+        })
+        .returning();
+      return { ...org, mine1, mine2, theirs, issue: issue! };
+    }
+    const trialUrl = (companyId: string, issueId: string) => `/api/companies/${companyId}/issues/${issueId}/match-trial`;
+
+    it("rejects a manager of a team not linked to the project", async () => {
+      const org = await seedTrialOrg();
+      const res = await request(createApp(db, agentActor(org.companyId, org.otherManager.id)))
+        .post(trialUrl(org.companyId, org.issue.id))
+        .send({ agentIds: [org.mine1.id, org.mine2.id] });
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects a linked-team manager using an agent from another team", async () => {
+      const org = await seedTrialOrg();
+      const res = await request(createApp(db, agentActor(org.companyId, org.manager.id)))
+        .post(trialUrl(org.companyId, org.issue.id))
+        .send({ agentIds: [org.mine1.id, org.theirs.id] });
+      expect(res.status).toBe(403);
+    });
+
+    it("allows a linked-team manager with own agents to create and decide", async () => {
+      const org = await seedTrialOrg();
+      const app = createApp(db, agentActor(org.companyId, org.manager.id));
+      const created = await request(app).post(trialUrl(org.companyId, org.issue.id)).send({ agentIds: [org.mine1.id, org.mine2.id] });
+      expect(created.status).toBe(201);
+      const deniedDecide = await request(createApp(db, agentActor(org.companyId, org.otherManager.id)))
+        .post(`${trialUrl(org.companyId, org.issue.id)}/${created.body.id}/decide`)
+        .send({ winnerAgentId: org.mine1.id, reason: "x" });
+      expect(deniedDecide.status).toBe(403);
+      const decided = await request(app)
+        .post(`${trialUrl(org.companyId, org.issue.id)}/${created.body.id}/decide`)
+        .send({ winnerAgentId: org.mine1.id, reason: "cleaner" });
+      expect(decided.status).toBe(200);
     });
   });
 

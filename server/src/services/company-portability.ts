@@ -6326,7 +6326,12 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
         // statements, turning what used to be one round-trip per row into a
         // handful per table. Empty buffers are skipped so an issues-free import
         // (e.g. routines only) issues no writes at all.
-        if (issueRows.length > 0) await issues.importIssues(targetCompany.id, issueRows);
+        if (issueRows.length > 0) {
+          const { demotedInProgressCount } = await issues.importIssues(targetCompany.id, issueRows);
+          if (demotedInProgressCount > 0) {
+            warnings.push(`${demotedInProgressCount} in-progress task(s) were moved to todo because an agent may hold only one task in progress.`);
+          }
+        }
         // Imported issues are historical work, not new inbox items. Seed a
         // per-user inbox archive for the importing board user so a large import
         // (a real 1,418-task company shipped every task to the inbox) does not
