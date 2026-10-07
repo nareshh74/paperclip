@@ -5,6 +5,7 @@ import { issues } from "./issues.js";
 import { projects } from "./projects.js";
 import { goals } from "./goals.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
+import { teams } from "./teams.js";
 
 export const costEvents = pgTable(
   "cost_events",
@@ -14,6 +15,8 @@ export const costEvents = pgTable(
     agentId: uuid("agent_id").notNull().references(() => agents.id),
     issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
     projectId: uuid("project_id").references(() => projects.id),
+    /** The agent's team when the cost was recorded. Team budgets aggregate on this, not on current membership. */
+    teamId: uuid("team_id").references(() => teams.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id),
     billingCode: text("billing_code"),
@@ -44,6 +47,11 @@ export const costEvents = pgTable(
     companyBillerOccurredIdx: index("cost_events_company_biller_occurred_idx").on(
       table.companyId,
       table.biller,
+      table.occurredAt,
+    ),
+    companyTeamOccurredIdx: index("cost_events_company_team_occurred_idx").on(
+      table.companyId,
+      table.teamId,
       table.occurredAt,
     ),
     companyHeartbeatRunIdx: index("cost_events_company_heartbeat_run_idx").on(

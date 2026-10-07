@@ -915,6 +915,10 @@ export function browserUseService(
       .select({ projectId: issues.projectId })
       .from(issues)
       .where(and(eq(issues.id, s.issueId), eq(issues.companyId, s.companyId)));
+    const [spender] = await db
+      .select({ teamId: agents.teamId })
+      .from(agents)
+      .where(and(eq(agents.id, s.agentId), eq(agents.companyId, s.companyId)));
     const event = await db.transaction(async (tx) => {
       const [current] = await tx
         .select()
@@ -929,6 +933,7 @@ export function browserUseService(
           agentId: s.agentId,
           issueId: s.issueId,
           projectId: issue?.projectId,
+          teamId: spender?.teamId ?? null,
           heartbeatRunId: run.heartbeatRunId,
           provider: "browser-use-cloud",
           biller: "browser-use-cloud",

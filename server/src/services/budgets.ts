@@ -162,13 +162,8 @@ async function computeObservedAmount(
   if (policy.scopeType === "agent") conditions.push(eq(costEvents.agentId, policy.scopeId));
   if (policy.scopeType === "project") conditions.push(eq(costEvents.projectId, policy.scopeId));
   if (policy.scopeType === "team") {
-    // Spend of current team members, by agent. ponytail: membership is read now, not at event time.
-    conditions.push(
-      inArray(
-        costEvents.agentId,
-        db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, policy.companyId), eq(agents.teamId, policy.scopeId))),
-      ),
-    );
+    // Spend is attributed to the agent's team at the time of spend (cost_events.team_id).
+    conditions.push(eq(costEvents.teamId, policy.scopeId));
   }
   const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind);
   if (policy.windowKind === "calendar_month_utc") {
@@ -683,13 +678,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           ),
         );
 
-      const eventAgentTeamId = candidatePolicies.some((policy) => policy.scopeType === "team")
-        ? await db
-            .select({ teamId: agents.teamId })
-            .from(agents)
-            .where(eq(agents.id, event.agentId))
-            .then((rows) => rows[0]?.teamId ?? null)
-        : null;
+      const eventAgentTeamId = event.teamId ?? null;
       const relevantPolicies = candidatePolicies.filter((policy) => {
         if (policy.scopeType === "team") return Boolean(eventAgentTeamId) && policy.scopeId === eventAgentTeamId;
         if (policy.scopeType === "company") return policy.scopeId === event.companyId;

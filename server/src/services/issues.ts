@@ -105,7 +105,8 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
-import { isForeignKeyViolation } from "../db-errors.js";
+import { isForeignKeyViolation, isUniqueViolation } from "../db-errors.js";
+import { recordIssueCompletionOutcome } from "./task-matching.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
 import {
@@ -6624,28 +6625,17 @@ export const AGENT_HAS_TASK_IN_PROGRESS_CODE = "agent_has_task_in_progress";
  * One task at a time: an agent may hold at most one in_progress issue.
  * A rejected pickup is logged as `agent.task_pickup_rejected` so the company can
  * count rejections as a scaling signal.
- * ponytail: check-then-write, not a DB constraint; a concurrent pickup race can still slip through.
+ * The check gives a clear error early; the partial unique index
+ * `issues_agent_single_in_progress_uq` closes the concurrent pickup race, and
+ * `mapSingleInProgressViolation` turns that index violation into the same 409.
  */
-async function assertAgentHasNoOtherTaskInProgress(
+async function rejectTaskPickup(
   db: Db,
   companyId: string,
   agentId: string,
   issueId: string,
-) {
-  const other = await db
-    .select({ id: issues.id, identifier: issues.identifier })
-    .from(issues)
-    .where(
-      and(
-        eq(issues.companyId, companyId),
-        eq(issues.assigneeAgentId, agentId),
-        eq(issues.status, "in_progress"),
-        ne(issues.id, issueId),
-      ),
-    )
-    .limit(1)
-    .then((rows) => rows[0] ?? null);
-  if (!other) return;
+  other: { id: string; identifier: string | null } | null,
+): Promise<never> {
   await logActivity(db, {
     companyId,
     actorType: "system",
@@ -6654,12 +6644,66 @@ async function assertAgentHasNoOtherTaskInProgress(
     action: "agent.task_pickup_rejected",
     entityType: "agent",
     entityId: agentId,
-    details: { agentId, blockedIssueId: issueId, inProgressIssueId: other.id },
+    details: { agentId, blockedIssueId: issueId, inProgressIssueId: other?.id ?? null },
   });
   throw conflict(
-    `Agent already has a task in progress (${other.identifier ?? other.id}). Finish or release it before starting another.`,
-    { code: AGENT_HAS_TASK_IN_PROGRESS_CODE, agentId, blockedIssueId: issueId, inProgressIssueId: other.id },
+    `Agent already has a task in progress (${other ? (other.identifier ?? other.id) : "another task"}). Finish or release it before starting another.`,
+    { code: AGENT_HAS_TASK_IN_PROGRESS_CODE, agentId, blockedIssueId: issueId, inProgressIssueId: other?.id ?? null },
   );
+}
+
+/** Same predicate as the `issues_agent_single_in_progress_uq` index. */
+async function findOtherInProgressTask(db: Db, companyId: string, agentId: string, issueId: string) {
+  return db
+    .select({ id: issues.id, identifier: issues.identifier })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.companyId, companyId),
+        eq(issues.assigneeAgentId, agentId),
+        eq(issues.status, "in_progress"),
+        isNull(issues.hiddenAt),
+        isNull(issues.conversationAgentId),
+        issueId ? ne(issues.id, issueId) : undefined,
+      ),
+    )
+    .limit(1)
+    .then((rows) => rows[0] ?? null);
+}
+
+/** Runs a write that may set in_progress and maps the one-task index violation to the pickup 409. */
+async function mapSingleInProgressViolation<T>(
+  db: Db,
+  target: { companyId: string | null; agentId: string | null | undefined; issueId: string },
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (!target.agentId || !isUniqueViolation(error, AGENT_SINGLE_IN_PROGRESS_INDEX)) throw error;
+    const companyId =
+      target.companyId ??
+      (await db
+        .select({ companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, target.issueId))
+        .then((rows) => rows[0]?.companyId ?? null));
+    if (!companyId) throw error;
+    const other = await findOtherInProgressTask(db, companyId, target.agentId, target.issueId);
+    return rejectTaskPickup(db, companyId, target.agentId, target.issueId, other);
+  }
+}
+
+const AGENT_SINGLE_IN_PROGRESS_INDEX = "issues_agent_single_in_progress_uq";
+
+async function assertAgentHasNoOtherTaskInProgress(
+  db: Db,
+  companyId: string,
+  agentId: string,
+  issueId: string,
+) {
+  const other = await findOtherInProgressTask(db, companyId, agentId, issueId);
+  if (other) await rejectTaskPickup(db, companyId, agentId, issueId, other);
 }
 
 export function issueService(db: Db) {
@@ -10314,8 +10358,11 @@ export function issueService(db: Db) {
         );
         return withRelations;
       };
-      if (dbOrTx === db) return db.transaction(persist);
-      return persist(dbOrTx as DbTransaction);
+      return mapSingleInProgressViolation(
+        db,
+        { companyId, agentId: data.status === "in_progress" ? data.assigneeAgentId : null, issueId: "" },
+        () => (dbOrTx === db ? db.transaction(persist) : persist(dbOrTx as DbTransaction)),
+      );
     },
 
     /**
@@ -10446,7 +10493,8 @@ export function issueService(db: Db) {
         }> = [];
 
         let counter = base;
-        for (const row of rows) {
+        let agentsInProgress: Set<string | null> | null = null;
+        for (let row of rows) {
           await assertExecutionTaskParent(tx as unknown as Db, companyId, row.parentId);
           counter += 1;
           const issueNumber = counter;
@@ -10465,6 +10513,28 @@ export function issueService(db: Db) {
           }
           if (row.status === "in_progress" && !row.assigneeAgentId) {
             throw unprocessable("in_progress issues require an assignee");
+          }
+          // One task at a time: an agent keeps at most one imported in_progress task.
+          if (row.status === "in_progress" && row.assigneeAgentId) {
+            if (!agentsInProgress) {
+              agentsInProgress = new Set(
+                (
+                  await tx
+                    .select({ agentId: issues.assigneeAgentId })
+                    .from(issues)
+                    .where(
+                      and(
+                        eq(issues.companyId, companyId),
+                        eq(issues.status, "in_progress"),
+                        isNull(issues.hiddenAt),
+                        isNull(issues.conversationAgentId),
+                      ),
+                    )
+                ).map((r) => r.agentId),
+              );
+            }
+            if (agentsInProgress.has(row.assigneeAgentId)) row = { ...row, status: "todo" };
+            else agentsInProgress.add(row.assigneeAgentId);
           }
 
           const projectId = row.projectId ?? null;
@@ -11071,6 +11141,7 @@ export function issueService(db: Db) {
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
         await recordChatCompletion(tx, receiptExisting, updated);
+        await recordIssueCompletionOutcome(tx, receiptExisting, updated);
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
         if (actorUserId && issueData.status !== undefined) {
@@ -11357,9 +11428,11 @@ export function issueService(db: Db) {
         };
       };
 
-      const result = await (dbOrTx === db
-        ? db.transaction(runUpdate)
-        : runUpdate(dbOrTx));
+      const result = await mapSingleInProgressViolation(
+        db,
+        { companyId: existing.companyId, agentId: nextAssigneeAgentId, issueId: id },
+        () => (dbOrTx === db ? db.transaction(runUpdate) : runUpdate(dbOrTx)),
+      );
       if (dbOrTx === db && !postCommitActivityPublications) {
         for (const publication of ownedActivityPublications)
           publishActivity(publication);
@@ -11460,12 +11533,12 @@ export function issueService(db: Db) {
         return enriched;
       }),
 
-    checkout: async (
+    checkout: (
       id: string,
       agentId: string,
       expectedStatuses: string[],
       checkoutRunId: string | null,
-    ) => {
+    ) => mapSingleInProgressViolation(db, { companyId: null, agentId, issueId: id }, async () => {
       const issueCompany = await db
         .select({ companyId: issues.companyId })
         .from(issues)
@@ -11715,7 +11788,7 @@ export function issueService(db: Db) {
         checkoutRunId: current.checkoutRunId,
         executionRunId: current.executionRunId,
       });
-    },
+    }),
 
     assertCheckoutOwner: async (
       id: string,

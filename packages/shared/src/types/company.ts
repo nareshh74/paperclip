@@ -27,6 +27,7 @@ export interface Company {
   spentMonthlyCents: number;
   defaultResponsibleUserId: string | null;
   runLimits?: import("./team.js").RunLimits;
+  matchingConfig?: import("./task-matching.js").MatchingConfig;
   requireBoardApprovalForNewAgents: boolean;
   interactionResolverGovernance: InteractionResolverGovernance;
   feedbackDataSharingEnabled: boolean;

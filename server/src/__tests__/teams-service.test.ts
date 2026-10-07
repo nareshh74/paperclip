@@ -223,8 +223,8 @@ describeEmbeddedPostgres("team service", () => {
     const member2 = await agentsSvc.create(companyId, { name: "M2", adapterType: "process", teamId: team.id });
     const outsider = await agentsSvc.create(companyId, { name: "Out", adapterType: "process" });
     const now = new Date();
-    for (const [agentId, costCents] of [[member1.id, 300], [member2.id, 250], [outsider.id, 10_000]] as const) {
-      await db.insert(costEvents).values({ companyId, agentId, provider: "pilot", model: "m", costCents, occurredAt: now });
+    for (const [agentId, teamId, costCents] of [[member1.id, team.id, 300], [member2.id, team.id, 250], [outsider.id, null, 10_000]] as const) {
+      await db.insert(costEvents).values({ companyId, agentId, teamId, provider: "pilot", model: "m", costCents, occurredAt: now });
     }
     const budgets = budgetService(db);
     const summary = await budgets.upsertPolicy(

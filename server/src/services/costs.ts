@@ -70,6 +70,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .values({
           ...data,
           companyId,
+          // Attribute spend to the team at the time of spend, so later moves do not shift it.
+          teamId: data.teamId !== undefined ? data.teamId : agent.teamId,
           biller: data.biller ?? data.provider,
           billingType: data.billingType ?? "unknown",
           cachedInputTokens: data.cachedInputTokens ?? 0,

@@ -201,5 +201,15 @@ export const issues = pgTable(
     onboardingFirstTaskIdx: uniqueIndex("issues_onboarding_first_task_uq")
       .on(table.companyId)
       .where(sql`${table.originKind} = 'onboarding_first_task'`),
+    // One task at a time: an agent holds at most one visible in_progress task.
+    // Conversations are excluded because one agent can chat with several users at once.
+    agentSingleInProgressIdx: uniqueIndex("issues_agent_single_in_progress_uq")
+      .on(table.assigneeAgentId)
+      .where(
+        sql`${table.status} = 'in_progress'
+          and ${table.assigneeAgentId} is not null
+          and ${table.hiddenAt} is null
+          and ${table.conversationAgentId} is null`,
+      ),
   }),
 );

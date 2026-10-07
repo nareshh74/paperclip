@@ -2630,6 +2630,15 @@ export type {
 } from "./types/folder.js";
 export type { Team, ProjectPmHandoff, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./types/team.js";
 export { RUN_LIMIT_KEYS } from "./types/team.js";
+export type { MatchFeatureKey, MatchWeights, MatchingConfig, MatchFeature, MatchCandidate, MatchCandidatesResult, MatchingTrialArm, MatchingTrial } from "./types/task-matching.js";
+export {
+  matchingConfigSchema,
+  matchCandidatesQuerySchema,
+  createMatchingTrialSchema,
+  decideMatchingTrialSchema,
+  type CreateMatchingTrial,
+  type DecideMatchingTrial,
+} from "./validators/task-matching.js";
 export {
   runLimitsSchema,
   createTeamSchema,

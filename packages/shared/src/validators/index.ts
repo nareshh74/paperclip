@@ -288,6 +288,14 @@ export {
   type ProjectPmHandoffInput,
 } from "./team.js";
 export {
+  matchingConfigSchema,
+  matchCandidatesQuerySchema,
+  createMatchingTrialSchema,
+  decideMatchingTrialSchema,
+  type CreateMatchingTrial,
+  type DecideMatchingTrial,
+} from "./task-matching.js";
+export {
   catalogTeamKindSchema,
   catalogTeamTrustLevelSchema,
   catalogTeamCompatibilitySchema,

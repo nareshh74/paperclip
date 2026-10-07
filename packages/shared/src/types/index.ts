@@ -242,6 +242,7 @@ export type {
 } from "./folder.js";
 export type { Team, ProjectPmHandoff, RunLimits, RunLimitKey, RunLimitSource, EffectiveRunLimits } from "./team.js";
 export { RUN_LIMIT_KEYS } from "./team.js";
+export type { MatchFeatureKey, MatchWeights, MatchingConfig, MatchFeature, MatchCandidate, MatchCandidatesResult, MatchingTrialArm, MatchingTrial } from "./task-matching.js";
 export type {
   CatalogTeamKind,
   CatalogTeamTrustLevel,
