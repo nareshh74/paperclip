@@ -113,6 +113,17 @@ describe("hermes-local adapter onSpawn forwarding", () => {
     expect(call[2]).toContainEqual(expect.stringContaining("Current task brief"));
   });
 
+  it("sends long prompts on stdin instead of argv (Windows ENAMETOOLONG)", async () => {
+    const { ctx } = makeCtx();
+    const description = "x".repeat(40_000);
+    const wake = { reason: "issue_assigned", issue: { id: "issue-1", description } };
+    await execute({ ...ctx, context: { ...ctx.context, paperclipWake: wake } } as any);
+    const call = vi.mocked(serverUtils.runChildProcess).mock.calls.at(-1)!;
+    expect(call[2].slice(0, 3)).toEqual(["chat", "--query-file", "-"]);
+    expect(call[2].join(" ").length).toBeLessThan(8000);
+    expect(call[3].stdin).toContain(description);
+  });
+
   it("launches in the assigned task workspace when no cwd was configured", async () => {
     const { ctx } = makeCtx();
     await execute({ ...ctx, context: { ...ctx.context, paperclipWorkspace: { cwd: "/private/qa/agent-workspace" } } } as any);
