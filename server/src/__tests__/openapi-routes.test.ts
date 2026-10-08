@@ -70,6 +70,8 @@ const apiPrefixes: Record<string, string> = {
   "sidebar-preferences.ts": "/api",
   "summary-slots.ts": "/api",
   "status-cards.ts": "/api",
+  "task-matching.ts": "/api",
+  "teams.ts": "/api",
   "teams-catalog.ts": "/api",
   "tool-access.ts": "/api",
   "tool-gateway.ts": "/api",

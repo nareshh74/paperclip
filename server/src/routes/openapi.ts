@@ -95,6 +95,13 @@ import {
   runRoutineSchema,
   // Folders
   createFolderSchema,
+  createTeamSchema,
+  updateTeamSchema,
+  linkTeamProjectSchema,
+  projectPmHandoffSchema,
+  createMatchingTrialSchema,
+  decideMatchingTrialSchema,
+  matchCandidatesQuerySchema,
   ensureMySkillFolderSchema,
   folderKindSchema,
   moveFolderItemSchema,
@@ -1615,6 +1622,9 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/routines",
   "POST /api/companies/{companyId}/folders",
   "POST /api/companies/{companyId}/folders/ensure-my",
+  "POST /api/companies/{companyId}/teams",
+  "POST /api/companies/{companyId}/projects/{projectId}/pm-handoff",
+  "POST /api/companies/{companyId}/issues/{issueId}/match-trial",
   "POST /api/routines/{id}/triggers",
   "POST /api/companies/{companyId}/secrets",
   "POST /api/companies/{companyId}/user-secret-definitions",
@@ -9672,6 +9682,112 @@ registerCurrentRoute({
   path: "/api/companies/{companyId}/folders/{folderId}",
   tags: ["folders"],
   summary: "Delete a folder",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/teams",
+  tags: ["teams"],
+  summary: "List teams in a company",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/teams/{teamId}",
+  tags: ["teams"],
+  summary: "Get a team",
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/teams",
+  tags: ["teams"],
+  summary: "Create a team",
+  body: createTeamSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/teams/{teamId}",
+  tags: ["teams"],
+  summary: "Update a team",
+  body: updateTeamSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/teams/{teamId}",
+  tags: ["teams"],
+  summary: "Delete a team",
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/teams/{teamId}/projects",
+  tags: ["teams"],
+  summary: "Link a project to a team",
+  body: linkTeamProjectSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/teams/{teamId}/projects/{projectId}",
+  tags: ["teams"],
+  summary: "Unlink a project from a team",
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/projects/{projectId}/pm-handoff",
+  tags: ["projects"],
+  summary: "Hand off a project's manager to another agent",
+  body: projectPmHandoffSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/projects/{projectId}/pm-handoffs",
+  tags: ["projects"],
+  summary: "List project manager handoffs",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/issues/{issueId}/match-candidates",
+  tags: ["task-matching"],
+  summary: "List candidate agents for an issue",
+  query: matchCandidatesQuerySchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/issues/{issueId}/match-trial",
+  tags: ["task-matching"],
+  summary: "Start a matching trial for an issue",
+  body: createMatchingTrialSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/issues/{issueId}/match-trial/{trialId}",
+  tags: ["task-matching"],
+  summary: "Get a matching trial",
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/issues/{issueId}/match-trial/{trialId}/decide",
+  tags: ["task-matching"],
+  summary: "Decide a matching trial winner",
+  body: decideMatchingTrialSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
 });
 
 registerCurrentRoute({
