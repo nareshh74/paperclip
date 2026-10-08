@@ -1,7 +1,7 @@
 import { Router, type Request } from "express";
 import { and, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents } from "@paperclipai/db";
+import { agents, projects, teams } from "@paperclipai/db";
 import {
   createTeamSchema,
   linkTeamProjectSchema,
@@ -45,17 +45,36 @@ export async function assertBoardCeoOrTeamManager(
   throw forbidden("Board, CEO, or team manager access required");
 }
 
+/** A manager: an agent that manages a team or leads a project, or holds the PM role. */
+async function isManagerAgent(db: Db, companyId: string, agentId: string, role: string | null) {
+  if (role === "pm") return true;
+  const [team] = await db
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.companyId, companyId), eq(teams.managerAgentId, agentId)))
+    .limit(1);
+  if (team) return true;
+  const [project] = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.companyId, companyId), eq(projects.leadAgentId, agentId)))
+    .limit(1);
+  return Boolean(project);
+}
+
 /**
  * Team membership change for one agent.
  * - Only the board may move the CEO agent.
- * - Joining from no team or leaving to no team needs the board or the CEO.
+ * - Joining a team from no team: the destination team's manager, the CEO, or the board.
+ *   A team manager cannot pull in another manager or a PM; that is the CEO's call.
+ * - Leaving to no team needs the board or the CEO.
  * - Moving between two teams needs the manager of both teams, the CEO, or the board.
  */
 export async function assertCanChangeTeamMembership(
   db: Db,
   req: Request,
   companyId: string,
-  target: { role: string | null } | null,
+  target: { id?: string; role: string | null } | null,
   fromTeamId: string | null | undefined,
   toTeamId: string | null | undefined,
 ) {
@@ -66,6 +85,16 @@ export async function assertCanChangeTeamMembership(
   const managerIds: Array<string | null> = [];
   for (const teamId of [fromTeamId, toTeamId]) {
     if (teamId) managerIds.push(await svc.assertTeamInCompany(companyId, teamId));
+  }
+  if (!fromTeamId && toTeamId) {
+    if (req.actor.type === "board") return;
+    const actor = await actorAgent(db, req, companyId);
+    if (actor?.role === "ceo") return;
+    if (!actor || actor.id !== managerIds[0]) throw forbidden("Board, CEO, or the destination team's manager access required");
+    if (target?.id && (await isManagerAgent(db, companyId, target.id, target.role))) {
+      throw forbidden("Only the CEO or the board can add a manager or PM to a team");
+    }
+    return;
   }
   if (!fromTeamId || !toTeamId) {
     await assertBoardOrCeo(db, req, companyId);

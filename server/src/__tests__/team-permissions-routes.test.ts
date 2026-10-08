@@ -161,14 +161,34 @@ describeEmbeddedPostgres("team permission routes", () => {
       }
     });
 
-    it("rejects a team manager pulling in a no-team agent or removing a member to no team", async () => {
+    it("lets a team manager add a no-team engineer but not remove a member to no team", async () => {
       const org = await seedOrg();
       const app = createApp(db, agentActor(org.companyId, org.manager.id));
-      expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id })).status).toBe(403);
-      await db.update(agents).set({ teamId: org.team.id }).where(eq(agents.id, org.engineer.id));
+      const joined = await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id });
+      expect(joined.status).toBe(200);
+      expect(joined.body.teamId).toBe(org.team.id);
       expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: null })).status).toBe(403);
       const row = await db.select().from(agents).where(eq(agents.id, org.engineer.id)).then((rows) => rows[0]!);
       expect(row.teamId).toBe(org.team.id);
+    });
+
+    it("rejects a team manager adding a no-team manager or PM", async () => {
+      const org = await seedOrg();
+      const app = createApp(db, agentActor(org.companyId, org.manager.id));
+      // otherManager manages another team; pm holds the PM role. Neither may be pulled in by a peer manager.
+      for (const target of [org.otherManager.id, org.pm.id]) {
+        await db.update(agents).set({ teamId: null }).where(eq(agents.id, target));
+        expect((await request(app).patch(`/api/agents/${target}`).send({ teamId: org.team.id })).status).toBe(403);
+      }
+      // A project lead counts as a manager even without the pm role.
+      await db.update(projects).set({ leadAgentId: org.engineer.id }).where(eq(projects.id, org.project.id));
+      expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id })).status).toBe(403);
+    });
+
+    it("rejects a manager adding a no-team agent to a team they do not manage", async () => {
+      const org = await seedOrg();
+      const app = createApp(db, agentActor(org.companyId, org.otherManager.id));
+      expect((await request(app).patch(`/api/agents/${org.engineer.id}`).send({ teamId: org.team.id })).status).toBe(403);
     });
 
     it("lets a manager of both teams move a member between them", async () => {
