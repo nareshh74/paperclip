@@ -47,7 +47,7 @@ import {
   type NativeExecutionInput,
   type PrpEvent,
 } from "@paperclipai/paperclip-runner";
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { nativeSha256 } from "./canonical.js";
 import { agentDirectoryWorkingCopyService } from "../agent-directory-working-copies.js";
@@ -203,6 +203,8 @@ const state = vi.hoisted(() => ({
     async (): Promise<Record<string, unknown> | null> => null,
   ),
   assertCurrentWakeCommentsRead: vi.fn(async () => undefined),
+  bundledPackManifestPath: null as string | null,
+  bundledRunnerBinary: null as string | null,
   resolveRunnerBinary: vi.fn(() => "/tmp/paperclip-runnerd"),
   release: null as null | (() => void),
 }));
@@ -231,6 +233,8 @@ vi.mock("../../vendor/paperclip-runner/index.js", async (importOriginal) => {
   >();
   return {
     ...original,
+    bundledRemoteProviderPackManifestPath: () => state.bundledPackManifestPath ?? original.bundledRemoteProviderPackManifestPath(),
+    bundledRemoteRunnerBinary: () => state.bundledRunnerBinary ?? original.bundledRemoteRunnerBinary(),
     createNativeSessionBackend: state.createBackend,
     createRunnerdCodexTransport: state.createTransport,
     executeNativeSession: state.execute,
@@ -365,6 +369,8 @@ import {
 } from "./native-session-executor.js";
 
 beforeEach(() => {
+  state.bundledPackManifestPath = null;
+  state.bundledRunnerBinary = null;
   state.createAssignedMcpTools.mockReset();
   state.resolveRunnerBinary.mockReset().mockReturnValue("/tmp/paperclip-runnerd");
   state.resolveCurrentWakeCommentsBinding.mockReset().mockResolvedValue(null);
@@ -828,7 +834,7 @@ describe("remote runner process supervision", () => {
     expect(handle.child.exitCode).toBeNull();
   });
 
-  it("terminates a detached runner when its process identity cannot be adopted", async () => {
+  it.each(["missing marker", "missing fingerprint"])("terminates a detached runner with %s before admitting managed work", async kind => {
     vi.useFakeTimers();
     try {
       let launchNonce = "";
@@ -847,10 +853,10 @@ describe("remote runner process supervision", () => {
           }
           if (label === "paperclip-runner-process-identity") {
             return {
-              exitCode: 3,
+              exitCode: kind === "missing fingerprint" ? 0 : 3,
               signal: null,
               timedOut: false,
-              stdout: "",
+              stdout: kind === "missing fingerprint" ? `${launchNonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` : "",
               stderr: "",
             };
           }
@@ -881,6 +887,7 @@ describe("remote runner process supervision", () => {
         stateDirectory: "/runtime",
         diagnosticsDirectory: "/runtime/diagnostics",
         runnerInstanceId: "runner-remote",
+        requireProcessStartFingerprint: true,
       });
 
       const handle = launcher({
@@ -1119,6 +1126,63 @@ describe("remote provider pack manifest", () => {
     }
     return JSON.stringify(value);
   };
+
+  it.each(["opencode", "cursor"] as const)("uses the bundled Linux image authority for remote %s without controller overrides", async provider => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-bundled-image-"));
+    const digest = "sha256:" + "a".repeat(64);
+    const artifacts = Object.fromEntries(Object.entries({
+      grokLauncher: "dist/providers/grok/launcher.cjs", nodeCommand: "node_modules/node/bin/node",
+      productionLock: "pnpm-lock.yaml", opencodeCommand: "node_modules/.bin/opencode",
+      opencodeExecutable: "node_modules/opencode-ai/bin/opencode.exe",
+      opencodeProxy: "dist/cli/opencode-app-server-proxy.cjs", acpxSidecar: "dist/cli/acpx-runtime-sidecar.cjs",
+    }).map(([key, path]) => [key, { path, sha256: digest }]));
+    const payload = {
+      target: { platform: "linux", architecture: "x64" }, runnerSourceRevision: "a".repeat(40),
+      pins: { nodeMinimum: "24.11.0", codex: QUALIFIED_ACPX_PROFILES.codex.agentRuntimeVersion,
+        opencode: "1.18.34", acpx: "0.13.1", grok: QUALIFIED_ACPX_PROFILES.grok.agentRuntimeVersion,
+        claudeAcp: QUALIFIED_ACPX_PROFILES.claude.agentServerVersion, codexAcp: QUALIFIED_ACPX_PROFILES.codex.agentServerVersion },
+      acpxProfileDigests: Object.fromEntries(["grok", "claude", "codex"].map(agent =>
+        [agent, QUALIFIED_ACPX_PROFILES[agent as "grok" | "claude" | "codex"].commandDigest])),
+      distDigest: digest, artifacts,
+      bridgeDigest: "sha256:" + createHash("sha256").update(digest + "\n" + digest + "\n" + digest).digest("hex"),
+    };
+    const manifest = { schema: "paperclip-runner/remote-provider-pack/v1", payload,
+      digest: "sha256:" + createHash("sha256").update(canonical(payload)).digest("hex") };
+    state.bundledPackManifestPath = join(root, "provider-pack.json");
+    state.bundledRunnerBinary = join(root, "linux-paperclip-runnerd");
+    await writeFile(state.bundledPackManifestPath, JSON.stringify(manifest));
+    await writeFile(state.bundledRunnerBinary, "verified Linux daemon fixture");
+    const remoteExecution = { ...execution, provider: provider === "opencode"
+      ? { kind: "opencode", model: null } : { kind: "acpx", agent: "cursor", model: null },
+      session: { ...execution.session, driverKind: provider === "opencode" ? "opencode_server" : "acpx_runtime" },
+    } as unknown as NativeExecutionInputV1;
+    const syncIn = vi.fn(async () => undefined);
+    const execute = vi.fn(async (command: { command: string; args?: string[] }) => {
+      if (command.args?.[0] === "--build-metadata") throw new Error("reached-staged-Linux-daemon-verification");
+      return { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    });
+    try {
+      await createRunnerdBackend({ db: leaseDb(remoteExecution), execution: remoteExecution,
+        runnerInstanceId: "bundled-image-runner", runnerIngressAuthorized: true,
+        runnerExecutionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/workspace",
+          environmentId: "environment", leaseId: "lease", providerKey: "daytona",
+          effectiveCapabilities: { runnerWebSocketIngress: true }, runner: { execute, syncIn } } as never });
+      state.createTransport.mockClear();
+      state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+      const transport = state.createTransport.mock.calls.at(-1)![0] as RunnerTransportOptions & {
+        controlPlaneRegistration: (authority: unknown) => Promise<unknown>;
+      };
+      expect(transport.runnerBinary).toBe(state.bundledRunnerBinary);
+      await expect(transport.controlPlaneRegistration({})).rejects.toThrow("reached-staged-Linux-daemon-verification");
+      expect(syncIn).toHaveBeenCalledWith([expect.objectContaining({ files: [expect.objectContaining({
+        sourcePath: state.bundledRunnerBinary, targetPath: "/workspace/.paperclip-runtime/paperclip-runner/bin/paperclip-runnerd",
+      })] })]);
+      expect(execute.mock.calls.some(([call]) => call.args?.[1] === "uname -s; uname -m")).toBe(false);
+    } finally {
+      state.bundledPackManifestPath = null; state.bundledRunnerBinary = null;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
   it("accepts a fully digested pack and rejects artifact tampering", async () => {
     const root = await mkdtemp(join(tmpdir(), "paperclip-provider-pack-"));
@@ -2519,6 +2583,14 @@ describe("remote runner build metadata", () => {
     expect(() =>
       assertRemoteRunnerBuildMetadata(current, "listen_ws"),
     ).not.toThrow();
+  });
+
+  it("requires an explicit Dot bridge capability only for remote Dot execution", () => {
+    expect(() => assertRemoteRunnerBuildMetadata(current, "listen_ws", "openai_dot_mcp"))
+      .toThrow("runner_remote_dot_capability_missing");
+    expect(() => assertRemoteRunnerBuildMetadata({ ...current, externalProviderCapabilities: ["openai_dot_mcp"] },
+      "listen_ws", "openai_dot_mcp")).not.toThrow();
+    expect(() => assertRemoteRunnerBuildMetadata(current, "listen_ws")).not.toThrow();
   });
 
   it("fails before dispatch when a preinstalled runner uses the stale contract", () => {
@@ -12905,8 +12977,9 @@ describe("runnerd provider runtime wiring", () => {
     ["opencode", { kind: "opencode", model: null }, "opencode_server"],
     ["acpx", { kind: "acpx", agent: "codex", model: null }, "acpx_runtime"],
   ])(
-    "requires the build-owned provider pack before launching remote %s",
+    "requires a build-owned provider pack identity before launching remote %s",
     async (providerKind, provider, driverKind) => {
+      state.bundledPackManifestPath = join(tmpdir(), randomUUID(), "provider-pack.json");
       const remoteCwd = "/home/daytona/paperclip-workspace";
       const remoteProviderExecution = {
         ...execution,
@@ -12944,8 +13017,9 @@ describe("runnerd provider runtime wiring", () => {
             },
           },
         }),
-      ).rejects.toThrow(
-        "runner_remote_provider_artifact_incompatible: configure PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH",
+      ).rejects.toThrow(providerKind === "opencode"
+        ? "runner_remote_provider_artifact_incompatible: provider-pack.json is unreadable"
+        : "runner_remote_provider_artifact_incompatible: configure PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH",
       );
       expect(state.createBackend).not.toHaveBeenCalled();
     },

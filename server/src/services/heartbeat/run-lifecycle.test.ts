@@ -8,7 +8,7 @@ import { publishLiveEvent } from "../live-events.js";
 import { getHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
-import { createHeartbeatLifecycle, type HeartbeatLifecycleDependencies } from "./run-lifecycle.js";
+import { createHeartbeatLifecycle, persistHeartbeatRunProcessMetadata, type HeartbeatLifecycleDependencies } from "./run-lifecycle.js";
 
 vi.mock("../live-events.js", () => ({ publishLiveEvent: vi.fn() }));
 
@@ -116,6 +116,16 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     const [run] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, wakeupRequestId: wake.id, status: "running", runtimeMode: "native", ...patch }).returning();
     return { company, agent, wake, run };
   }
+
+  it("preserves sandbox process birth instead of inspecting a colliding controller PID", async () => {
+    const { run } = await fixture();
+    const remoteBirth = "2026-10-09T00:00:00.000Z";
+    const persisted = await persistHeartbeatRunProcessMetadata(db, run.id, {
+      pid: process.pid, processGroupId: null, startedAt: remoteBirth, targetKind: "remote",
+    });
+    expect(persisted?.processStartedAt?.toISOString()).toBe(remoteBirth);
+    expect(persisted?.processPid).toBe(process.pid);
+  });
 
   it("keeps one terminal outcome and reports only the winner of competing writes", async () => {
     const { run } = await fixture();

@@ -1031,6 +1031,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
       { agentId: creatorAgentId },
     );
 
+    await db.update(agents).set({ lifecycleState: "terminated", status: "terminated" }).where(eq(agents.id, addresseeAgentId));
     await agentService(db).remove(addresseeAgentId);
 
     const cancelled = await interactionsSvc.getById(created.id);

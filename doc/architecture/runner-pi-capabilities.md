@@ -22,7 +22,115 @@ for the exact source/image evidence and merge status.
 All dated checkpoints below describe historical qualification attempts. Their
 failures and profile numbers are retained; they are not current release gates.
 
-## Historical Pi 1.0 candidate (2026-10-02, profile v12)
+## User-selected models (2026-10-06)
+
+Native Pi accepts any explicit provider/model ID. The settings builder, server,
+release profile, and Rust runner do not restrict selection to a qualification
+model. Pi must acknowledge the exact selection before a prompt and on recovery;
+unavailable models fail clearly without selecting a substitute. Runtime package,
+version, command, permission, and process-ownership checks remain enforced.
+
+Bind the selected provider's credentials in the agent environment, for example
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, or `OPENROUTER_API_KEY`.
+Custom models use `PAPERCLIP_PI_PROVIDERS`, an explicit JSON object in Pi's
+`models.json` providers format. The runner writes it into the private Pi home,
+forwards explicitly bound credential references, and includes its digest in
+recovery identity. Credential commands and control-plane credential references
+are rejected. General AWS IAM keys are excluded; Bedrock uses `AWS_BEARER_TOKEN_BEDROCK`. Choose a thinking level supported by the selected model (`off`
+for a model without reasoning).
+
+The DeepSeek model IDs throughout the historical qualification results below
+identify those attempts; they are not a product allowlist. Those results do not
+qualify this merge or additional models.
+
+
+## Historical Pi 1.0 candidate (2026-10-02, profile v13)
+
+Pi remains pinned to **`@earendil-works/pi-coding-agent@1.0.0`**, with
+`pi-acp@0.0.33`, ACPX `0.13.1`, and Node `24.21.0`. Profile 13 adds explicit
+reasoning-mode selection and rejects previous profile identities. It is a new
+qualification candidate; profile-12 results below remain historical evidence.
+
+Pi's new field also changes four shared files covered by Copilot's source
+identity. The subsequent live callback snapshot changes the shared sidecar again,
+so Copilot now uses still-unqualified profile v14 without changing its executable
+or model. Pi's profile-13 identity and native closure
+remain unchanged. Final artifacts must bind the corrected source; the initial
+ARM startup and 61 contract passes alone do not establish production readiness.
+
+The normal Pi configuration records `piThinkingLevel` as `off`, `low`, `high`,
+or `max`. New configurations and qualification cases explicitly select `low`.
+The runner binds that setting to the session identity and requires native
+confirmation of the effective level before sending the prompt, including after
+session restoration. An unsupported level, absent acknowledgement, or effective
+level different from the requested value must fail admission. Changing the
+level requires a new compatible session; a warm session cannot silently retain
+its previous setting.
+
+The wrapper obtains available levels from Pi's native
+`get_available_thinking_levels` RPC, exposes them through ACP session modes and
+the `thought_level` configuration option, and confirms changes with native
+`get_state`. This avoids advertising the static `minimal`, `medium`, or `xhigh`
+aliases when the selected model does not support them. For the pinned DeepSeek
+model, Pi 1.0 supports `off`, `low`, `high`, and `max`. Pi's implicit `medium`
+default resolves to `high`; Pi 0.84.2 also resolved that default to `high`, so
+this is a configuration gap rather than evidence of a new Pi 1.0 default.
+
+The [provider-free wire proof](../../packages/paperclip-runner/test-fixtures/pi-acp/thinking-modes.v13.darwin-arm64.json)
+records actual Pi 1.0 request bodies changing from `high` to `low` through ACP,
+truthful `max` restoration, blocked non-loopback connections, and owned-process
+retirement. Synthetic responses establish propagation, not paid qualification.
+
+The paid profile-12 hello passed in the actual installed application. Its first
+question continuation failed at the unchanged 120-second native deadline after
+1,019 reasoning deltas and no emitted tool call or question. The required tool
+was present with its exact schema. This establishes model activity without the
+required interaction; it does not prove the reasoning setting caused the timeout.
+The test remains failed. Profile-13 deterministic, local paid, Runner, native
+control, and Daytona results must be established independently.
+
+| Capability | Native / ACP surface | Paperclip surface | Remaining boundary |
+| --- | --- | --- | --- |
+| Supported thinking levels | `get_available_thinking_levels`; ACP available session modes and `thought_level` choices | Pi reasoning-level configuration | Model selection is explicit and unrestricted; historical qualification used the recorded model and level. |
+| Set and verify thinking level | Native `set_thinking_level`, then `get_state`; ACP `session/set_mode` / config option | Saved agent setting, typed runner input, effective-mode admission | Live setting changes during an active turn are not exposed; a new compatible session is required. |
+| Recover selected level | Native restored state plus explicit effective-level verification | Mode-bound durable session identity | Old profiles and missing or mismatched mode identity cannot reuse a warm session. |
+| Provider notice severity and pricing provenance | `paperclip/pi_notice` and canonical `provider.notice.recorded` | Retained run event, usage metadata, and safe summary with severity in the activity row | Summary/severity rendering has deterministic coverage; paid visual verification of the rebuilt UI remains pending. Pricing estimates remain distinct from provider billing receipts. |
+
+## Historical profile-13 qualification checkpoint (2026-10-02)
+
+The installed candidate from source `eac50643213d0902a93a5384bae2f1d6c065c9f2`
+uses Pi 1.0.0, the explicit OpenRouter DeepSeek model above, and verified `low`
+reasoning. Paid local Product E2E passes cover hello, semantic question/answer
+continuation, all four native question forms, and human permission denial with
+no file side effect. The paid extended Runner `get-task-context` case also
+passes through the packaged runner against its authenticated, seeded test
+control plane. Runner protocol evidence does not qualify the Product UI.
+
+Three local attempts remain failed: file-edit validation, pending-input
+controller restart, and three-turn warm continuation. The first two exposed
+assertion gaps: streamed command output supplies the exit receipt, and a
+pre-start submission may precede assignment of the native turn ID. Narrow
+fixture repairs have positive and negative coverage; neither failed attempt
+has been regraded and both require fresh live runs.
+
+The warm attempt completed its first turn and edited files on its second, but
+its final semantic tool stayed pending until the existing deadline. OpenRouter
+metadata joins the exact native session and records the final response as
+cancelled with no finish reason. This supports an unfinished upstream response
+at cancellation; it does not establish why the response stopped progressing.
+A real pinned SDK/wrapper replay proves both restored-session completion with
+the new agent home and completion contract, and safe cancellation when complete
+tool JSON arrives without the provider's stream finish marker. The latter
+executes no semantic mutation. No timeout or runtime policy was changed to make
+that replay pass.
+
+Fresh builds must incorporate the subsequent launch, UI, and fixture fixes.
+macOS Intel startup, the remaining local and Runner cases, Linux/Daytona, and
+final source-wide checks remain qualification gates. The provider remains
+unqualified until that evidence is complete. API-key usage observations cover
+the capped qualification campaign; native pricing estimates are not bills.
+
+## Historical Pi 1.0 profile-v12 checkpoint (2026-10-02)
 
 The candidate now pins **`@earendil-works/pi-coding-agent@1.0.0`** with
 `pi-acp@0.0.33`, ACPX `0.13.1`, and portable Node `24.21.0`. Pi v11 and older
@@ -95,6 +203,76 @@ add capabilities which must not be confused with wrapper support:
 
 Pi's published CLI mode union is `text | json | rpc`; no native ACP mode is
 present in this release. The reviewed `pi-acp` wrapper remains necessary.
+
+
+## Explicit Linux companion setup for a Mac controller
+
+A Mac controller needs independently verified Linux runner bytes for Daytona.
+Its host Pi installation is not a Linux provider pack. The operator imports a
+release companion once, before launching agents:
+
+```sh
+paperclipai runtime import-remote /path/to/release/linux-x64 --sha256 MANIFEST_SHA256
+```
+
+Obtain `MANIFEST_SHA256` from the trusted release channel, separately from the
+copied directory. The directory contains `companion.json`,
+`bin/paperclip-runnerd`, and the complete `provider-pack/`. Import verifies the
+installed server's exact build commit, qualified Pi profile, Linux x64 ELF,
+manifest digest, and every file, mode, directory and contained symbolic link.
+External hardlinks, escaping links, extra or modified files, and unsafe modes
+are rejected. This command performs no network requests or model calls and does
+not run the Linux executable on the Mac.
+
+The destination is the private `remote-companions/linux-x64` directory beneath
+the actual installed `@paperclipai/server` package. It must be writable by the
+operator, outside the task workspace, and protected with the same host access
+controls as the server installation. It is not an agent workspace or a remote
+image's self-reported authority. An existing different or damaged installation
+is never replaced automatically. Stop all runs before an operator removes or
+upgrades that cache. Verification and copying use asynchronous 1 MiB chunks,
+yield between chunks, and enforce the same full inventory and ten-minute bound.
+Directory entries must retain owner read/write/search permissions so failed imports
+can drain their owned cleanup. SIGINT/SIGTERM are deferred through owned filesystem
+phases and drain cleanup;
+an uncatchable kill or host failure leaves the import unadmitted until the
+operator resolves its retained lock or incomplete directory. Do not move the
+cache into a task workspace to work around permissions.
+
+Normal remote Pi resolves this authority without binary or pack environment
+overrides. The controller re-verifies its complete inventory and uses the exact
+Linux daemon identity. Existing remote verification compares image bytes against
+that local authority; a mismatch takes the existing verified upload path.
+Controller restart and warm-session recovery retain the original Runner artifact
+identity checks. Cursor, Copilot and explicit operator overrides keep their
+existing admission rules.
+
+For release maintainers, assemble the Linux daemon and default provider pack
+for the **same final commit** as the public server/CLI packages. A reused daemon
+requires complete native source/config/protocol input equality and retains its
+original compiler/build provenance; the manifest does not claim recompilation. In a fresh
+release directory place those outputs at `bin/paperclip-runnerd` and
+`provider-pack/`, preserving the pack's relative links and modes. Then run the
+source-owned manifest generator after building the matching server:
+
+```sh
+node scripts/create-runner-remote-companion.mjs /path/to/release/linux-x64 FINAL_SOURCE_SHA
+```
+
+Publish the complete companion directory (or distribute it through the normal
+trusted release channel) together with the printed manifest SHA256 and the
+source/profile/platform provenance. The import command accepts an already
+extracted directory, not an archive or URL. The release companion must remain
+available with that release; a short-lived qualification artifact is not a
+release distribution. No release publication is implied by the tests here.
+
+Build/publish the Daytona image from those same daemon/pack outputs and configure
+its immutable OCI digest through the ordinary Daytona environment `image` field.
+The image digest and companion manifest are output metadata, not new source
+constants, so publication does not require another source commit. The final live
+proof must use the installed public CLI, this import command, and ordinary image
+configuration without E2E remote binary/provider-pack overrides. That installed
+and paid proof remains pending.
 
 
 Historical v10 qualification checkpoint (2026-09-30): **Pi profile v10 remains unqualified.** The capped-key/login prerequisite remains blocked. Native USD is unknown. The optional private budget helper is not integrated; Cursor's account-cycle cap does not establish Pi's provider spending bound. V10 keeps the native wrapper and closures unchanged, binds the shared ACPX patch under a new digest, and rejects v9 sessions. Fresh exact-runtime admission and final controller verification remain pending.
@@ -209,8 +387,8 @@ addressed by v4. Version 2 hello completion and every failure remain retained.
 The wider local and Linux x64 Daytona matrix remains pending; this document does
 not promote the candidate to a qualified production runtime.
 
-The runner pins `pi-acp@0.0.33` and
-`@earendil-works/pi-coding-agent@0.84.2`. The candidate model is
+At this historical pre-1.0 checkpoint, the runner pinned `pi-acp@0.0.33` and
+`@earendil-works/pi-coding-agent@0.84.2`. The candidate model was
 `openrouter/deepseek/deepseek-v4-flash-0731`; only an explicitly bound OpenRouter
 credential may reach this profile. `patches/pi-acp@0.0.33.patch` repairs the ACP
 wrapper. `pi-runtime-extension.ts` supplies the runner-owned semantic bridge and
@@ -985,3 +1163,62 @@ that ID unchanged into the shared MCP dedupe boundary. This is a further
 integration defect. The shared dedupe guard and canonical grader remain intact.
 Both runs lack terminal usage; measured billing is $0.002440082 and cleanup
 passes. Restart and refreshed hello are held until this defect is repaired.
+
+## Explicit host installation
+
+For a published local Paperclip installation, run `paperclipai runtime setup pi`
+with the same installed CLI and account that owns the server package. This is an
+explicit download and verification step; npm installation and agent launch never
+perform it automatically. It installs only this host's supported platform
+(macOS ARM64, macOS x64, or Linux x64), using the source-pinned Node archive, npm
+lock, wrapper patch and complete Pi closure. Node 24, npm, git, tar and the normal
+platform dependency inspector (`otool` or `ldd`) must be available. The server
+package must be writable by the installing account. Explicit setup preserves
+`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, their lowercase equivalents,
+`SSL_CERT_FILE`, `SSL_CERT_DIR` and
+`NODE_EXTRA_CA_CERTS` for public downloads, and enables Node's environment proxy
+handling. The provisioner keeps the same closed allowlist. Instance settings,
+provider credentials, user npm configuration, `HOME`, `NODE_OPTIONS` and
+`NODE_PATH` are excluded; TLS certificate validation stays enabled.
+
+The public server carries a self-contained setup tool and small pinned inputs in
+`dist/vendor/paperclip-runner/cli`; the installed host closure lives in that
+server package's `provider-assets/pi/<platform>`. Setup validates an existing
+closure again before accepting it. A corrupt existing installation is left
+untouched and rejected; reinstall the same Paperclip release into a clean package
+location and repeat setup. Concurrent setup is rejected. Cancellation drains the
+current bounded download/build command before removing its private staging tree;
+allow that cleanup to complete before trying again.
+
+Then select Pi with an explicit provider/model ID and bind its provider credential
+through the normal agent environment configuration. Setup itself makes no model request.
+A missing host closure produces explicit setup guidance. Daytona uses the
+separately built and verified Linux provider pack in its runner image; running
+local setup does not install or qualify a remote image. Published-tar local and
+Daytona startup evidence must bind the final installation candidate, with no
+candidate qualification flags, before a production-readiness claim.
+
+
+## Cold process admission budget
+
+Pi cold `session.open`, including process replacement and durable reopen, has a
+60-second admission budget. The controller shares one deadline across its cold
+open/recovery command and provider identity barriers (`session.open`, replacement
+`run.attach`, and replacement `runner.drain`). A live adopted runner keeps the
+ordinary 30-second waits. Rust gives only Pi's sidecar `session.open` request the
+60-second budget; initialize, attach, turn start and other sidecar commands stay
+at 30 seconds. Inner ACP handshake (30 seconds), post-admission verification
+(8 seconds), cancellation (2 seconds), and close (7 seconds) are unchanged.
+
+Timeout still poisons and retires the Rust sidecar process group. Closing the
+controller during its startup wait rejects that wait and uses the existing owned
+process cleanup. Callers must await transport close in their cleanup path.
+This is trusted controller timing policy, outside the immutable Pi wrapper/profile
+closure; it does not change profile 13, runtime 1.0.0, or the explicit model.
+
+The credential-free closed-startup regression requires the real
+`session_ensure_failed` rejection within 60 seconds, with no prompt, no provider
+identity and confirmed cleanup. Its child watchdog is 80 seconds (20 seconds for
+cleanup after admission), inside a 90-second test timeout. Failed evidence stays
+in its reported temporary directory. These margins do not extend production
+command deadlines or qualify a target platform without a fresh run.

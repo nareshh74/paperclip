@@ -445,8 +445,12 @@ recovery, credentials, or execution policy.
 
 AI account selection also stays local when the selection service proves a
 missing responsible user, personal default, or selected connection; an
-incompatible selection; or an account that needs reconnection. The service marks
-the original error, and setup preserves its closed `selectionFailure` reason.
+incompatible selection; an account that needs reconnection; or an active
+responsible user who lacks the selected credential's human sharing permission.
+The sharing rejection keeps its existing HTTP 403 and does not grant access.
+Other permission denials, including absent identity and inactive membership,
+remain outside this sharing classification. The service marks the original error,
+and setup preserves its closed `selectionFailure` reason.
 The same failed/preparing/setup/bootstrap checks apply, and resumed native runs
 with persisted provider input remain reportable. The generic
 `ai_connection_unavailable` wrapper alone is insufficient: database, credential
@@ -617,6 +621,20 @@ includes `workspaceRestoreFailure` with one of the shared, path-free codes:
 or `restore_failed`. Unknown values are omitted. Workspace paths and arbitrary
 pre-restore result data are not included. A later successful run does not, by
 itself, establish that an earlier failed restore recovered the workspace files.
+
+For `configuration_incomplete` with `workspace_base_ref_unresolved`,
+`run_execution` includes `workspaceBaseRefRemoteLookup`, `workspaceBaseRefAuthLookup`,
+`workspaceBaseRefFetch`, and `workspaceBaseRefRefResolution` when producer evidence
+is available. These closed outcomes distinguish skipped operations, auth lookup
+failure, and failed or completed Git commands. Optional `workspaceBaseRefFetchExitCode`
+and `workspaceBaseRefRefExitCode` are integers from 0 through 255.
+`workspaceBaseRefFetchFailureKind` is a coarse, bounded Git diagnostic category;
+unknown, mixed, truncated, or oversized command output remains `unknown`.
+A failed fetch that prints “remote ref not found” is an observation, not
+authoritative proof of user error. These failures remain reportable. The fields
+add no Git calls and do not change authentication, retries, task blocking,
+recovery actions, or Sentry filtering. They never contain repository URLs,
+configured refs, command output, paths, or credentials.
 
 For `workspace_validation_failed` with `git_worktree_not_reusable`, `run_execution`
 includes `workspaceValidationReason` and an allowlisted `workspaceValidationReasonCode`:

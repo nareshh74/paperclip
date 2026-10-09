@@ -896,7 +896,10 @@ it.each(["after_budget", "within_budget", "interrupted_within_budget", "persiste
         "--split-event-prefix-count", "2", "--split-event-suffix-count", "2",
       ),
       stateDirectory,
-      closeGraceMs: 5_000,
+      // Successful cases use the production close budget for the real
+      // semantic-result, stop, drain and suspension round trips. Keep the
+      // shorter deadline only for intentionally unfinishable callbacks.
+      ...(settles ? {} : { closeGraceMs: 5_000 }),
       controlPlaneRegistration: async (authority) => {
         core = authority;
         await authority.start();
@@ -1586,6 +1589,15 @@ it.each(["acpx-runtime-sidecar.cjs", "opencode-app-server-proxy.cjs"] as const)(
     }
   },
 );
+
+it("requires a remote OpenCode executable before resolving controller dependencies", () => {
+  expect(() => runnerdLaunchProfileInternals.resolveRunnerOpenCodeExecutable({
+    runnerFilesystemRoot: "/provider-pack",
+  })).toThrow("OpenCode executable is missing from the provider pack");
+  expect(runnerdLaunchProfileInternals.resolveRunnerOpenCodeExecutable({
+    runnerFilesystemRoot: "/provider-pack", opencodeCommand: "/provider-pack/opencode",
+  })).toBe("/provider-pack/opencode");
+});
 
 it("derives the ACPX package authority only from the verified dist/cli layout", () => {
   const runnerPackageRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -6449,17 +6461,23 @@ it("rotates PRP authority in place for a warm cross-run attachment", async () =>
 
 it("reopens Pi after a completed turn within its cold admission budget during warm attachment", async () => {
   const root = await mkdtemp(join(tmpdir(), "runnerd-pi-warm-admission-"));
+  const providerNode = process.platform === "linux" ? join(root, "node") : process.execPath;
+  if (process.platform === "linux") {
+    await cp(process.execPath, providerNode, { dereference: true });
+    await chmod(providerNode, 0o500);
+    expect((await stat(providerNode)).mode & 0o777).toBe(0o500);
+  }
   const cliRoot = join(root, "dist/cli");
-  await mkdir(cliRoot, { recursive: true });
+  await mkdir(cliRoot, { recursive: true, mode: 0o700 });
   const sidecarPath = join(cliRoot, "acpx-runtime-sidecar.cjs");
   const journal = join(root, "commands.ndjson");
   const fixture = await readFile(fileURLToPath(new URL("./fixtures/fake-pi-warm-sidecar.cjs", import.meta.url)), "utf8");
-  await writeFile(sidecarPath, fixture.replace("/* fixture-config */ null", JSON.stringify({ journal, resumeDelayMs: 32_000, commandDigest: QUALIFIED_ACPX_PROFILES.pi.commandDigest })));
+  await writeFile(sidecarPath, fixture.replace("/* fixture-config */ null", JSON.stringify({ journal, resumeDelayMs: 32_000, commandDigest: QUALIFIED_ACPX_PROFILES.pi.commandDigest })), { mode: 0o600 });
   const digest = (path: string) => `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`;
   const bundle = createCapabilityRunnerdCodexTransport({
     provider: "acpx", acpxAgent: "pi", piThinkingLevel: "low", acpxPermissionMode: "deny-all",
     runnerBinary: defaultCapabilityRunnerdBinary(), stateDirectory: root, runnerFilesystemRoot: root,
-    providerNodeCommand: process.execPath, providerNodeCommandSha256: digest(process.execPath),
+    providerNodeCommand: providerNode, providerNodeCommandSha256: digest(providerNode),
     acpxSidecarPath: sidecarPath, acpxSidecarSha256: digest(sidecarPath),
     providerPackAuthorityDigest: `sha256:${"d".repeat(64)}`,
     lifecyclePolicy: { mode: "warm", idleTimeoutMs: 60_000 },

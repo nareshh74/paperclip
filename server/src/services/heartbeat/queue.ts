@@ -1,4 +1,6 @@
+import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
+import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import {
   type WakeupOptions,
   mergeCoalescedContextSnapshot,
@@ -39,6 +41,7 @@ import { claimQueuedNativeReviewRun } from "../native-runtime/native-review-disp
 import { adapterExecutionControls } from "../adapter-execution-control.js";
 import { executionFailureRetryCount } from "../execution-recovery-attempt.js";
 import {
+  slackMentionAllowsRunStart,
   assertDurableChatWakeupReceipt,
   assertDurableChatWakeupRequest,
   authorizeFailedChatRunRetryWake,
@@ -160,7 +163,7 @@ import type { issueTreeControlService } from "../issue-tree-control.js";
 import type { budgetService } from "../budgets.js";
 import type { instanceSettingsService } from "../instance-settings.js";
 import type { createRunDispatch } from "../../modules/run-dispatch/index.js";
-import type { createWakeQueue } from "../../modules/wake-queue/index.js";
+import type { PostCommitEffect as WakeQueuePostCommitEffect, createWakeQueue } from "../../modules/wake-queue/index.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type HeartbeatRunState = ReturnType<typeof createHeartbeatRunState>;
@@ -194,7 +197,8 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   filterZombieCoalesceTarget: <T extends { id: string; status: string }>(run: T | null, live: { has(id: string): boolean }) => T | null;
   getSchedulingSuppression: () => Promise<{ suppressed: boolean; reason: "worktree_instance" | "database_restore_in_progress" | "task_drain" | null }>;
   executeRun: (runId: string) => Promise<void>;
-  releaseIssueExecutionAndPromote: (run: Pick<HeartbeatRun, "id" | "companyId">, options?: { suppressImmediateRecovery?: boolean }) => Promise<unknown>;
+  releaseIssueExecutionAndPromote: (run: Pick<HeartbeatRun, "id" | "companyId">, options?: { suppressImmediateRecovery?: boolean; deferredPostCommitEffects?: WakeQueuePostCommitEffect[] }) => Promise<unknown>;
+  applyWakeQueuePostCommitEffects: (effects: WakeQueuePostCommitEffect[]) => Promise<void>;
   publishRunLifecyclePluginEvent: (run: HeartbeatRun) => void;
   cancelRunInternal: (runId: string, reason?: string, options?: { errorCode?: string }) => Promise<unknown>;
   cancelActiveForAgentInternal: (agentId: string, reason: string) => Promise<unknown>;
@@ -341,6 +345,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     setWakeupStatus,
     appendRunEvent,
     releaseIssueExecutionAndPromote,
+    applyWakeQueuePostCommitEffects,
     issuesSvc,
     options,
     publishRunLifecyclePluginEvent,
@@ -931,8 +936,34 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
+    deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
   ) {
     if (run.status !== "queued") return run;
+    // Claim is the first execution boundary. startedAt survives same-run
+    // retries; restart recovery may also enter executeRun already running.
+    // Neither may reinterpret an admitted, already-started message as new work.
+    if (!run.startedAt && !(await slackMentionAllowsRunStart(db, run))) {
+      const now = new Date();
+      const reason = "Message did not @mention the bot";
+      // This runs under the agent start lock. Do not use cancelRunInternal,
+      // which recursively starts the next run and reacquires that lock.
+      const cancelled = await setRunStatus(run.id, "cancelled", {
+        finishedAt: now,
+        error: reason,
+        errorCode: "chat_mention_required",
+      });
+      if (cancelled) {
+        await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: reason });
+        await appendRunEvent(cancelled, {
+          eventType: "lifecycle", stream: "system", level: "warn", message: reason,
+        });
+        await releaseIssueExecutionAndPromote(cancelled, {
+          suppressImmediateRecovery: true, deferredPostCommitEffects,
+        });
+      }
+      return null;
+    }
+
     const agent = await getAgent(run.agentId);
     if (!agent) {
       await cancelRunInternal(
@@ -941,6 +972,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       );
       return null;
     }
+    // Keep accepted work in the durable queue until setup completes.
+    if (isAgentAwaitingSetup(agent)) return null;
     const invokability = companyAgents
       ? evaluateAgentInvokability(toAgentOrgRow(agent), companyAgents)
       : await getAgentInvokability(agent);
@@ -1761,7 +1794,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
         eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
       ));
-      if (!latest || latest.runtimeMode !== "legacy" || !isHeartbeatRunTerminalStatus(latest.status)) continue;
+      if (!latest || !isHeartbeatRunTerminalStatus(latest.status)) continue;
+      if (latest.runtimeMode === "native" && typeof wake.payload?.dotAssignmentFollowUp === "string") {
+        await releaseIssueExecutionAndPromote(latest, { suppressImmediateRecovery: true }).catch(err => {
+          logger.warn({ err, queueId: wake.id }, "failed to promote unread Dot comment after recovery");
+        });
+        continue;
+      }
+      if (latest.runtimeMode !== "legacy") continue;
       const cancelledAdmission = latest.status === "cancelled" && !latest.startedAt &&
         latest.errorCode === "execution_reconciliation_required";
       if ((latest.status !== "cancelled" || cancelledAdmission) && await getExecutionBlocker(db, wake.companyId, String(wake.payload?.issueId))) {
@@ -1862,6 +1902,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // Cancelled after the start lock is released: cancelRunInternal promotes the
     // agent's next queued run, which takes this same lock.
     const rejectedClaims: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }> = [];
+    const deferredPostCommitEffects: WakeQueuePostCommitEffect[] = [];
+    let cancellationReason: string | undefined;
 
     return withAgentStartLock(agentId, async () => {
       const agent = await getAgent(agentId);
@@ -1869,10 +1911,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const invokability = await getAgentInvokability(agent);
       if (!invokability.invokable) {
         if (shouldCancelRunsForNonInvokableAgent(invokability)) {
-          await cancelActiveForAgentInternal(
-            agentId,
-            `Cancelled because the agent is not invokable: ${invokability.reason}`,
-          );
+          cancellationReason = `Cancelled because the agent is not invokable: ${invokability.reason}`;
         }
         return [];
       }
@@ -1975,7 +2014,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         if (claimedRuns.length >= availableSlots) break;
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
-          claimed = await claimQueuedRun(queuedRun, companyAgents);
+          claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects);
         } catch (err) {
           if (isPermanentClaimRejection(err)) {
             rejectedClaims.push({ run: queuedRun, err });
@@ -2011,7 +2050,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         });
       }
       return claimedRuns;
-    }).finally(() => cancelRejectedQueuedRuns(rejectedClaims));
+    }).finally(async () => {
+      // Dispatch promoted inputs after the agent start lock is released.
+      try {
+        await applyWakeQueuePostCommitEffects(deferredPostCommitEffects);
+      } finally {
+        if (cancellationReason) await cancelActiveForAgentInternal(agentId, cancellationReason);
+        await cancelRejectedQueuedRuns(rejectedClaims);
+      }
+    });
   }
 
   // Public wakeup entry point. Callers dispatch it fire-and-forget, so register
@@ -2501,7 +2548,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
     }
 
-    const invokability = await getAgentInvokability(agent);
+    // Setup delays execution, but must not discard work accepted by a caller.
+    const invokability = await getAgentInvokability(isAgentAwaitingSetup(agent) ? { ...agent, status: "idle" } : agent);
     if (!invokability.invokable) {
       if (opts.requestedByActorType !== "user" || executionWaitRequestId) {
         await writeSkippedRequest("agent.not_invokable", {
@@ -3603,6 +3651,43 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // its fresh-session contract into unrelated work or create a second
             // deferred wake that could later replay the same reconciliation.
             if (reconciledSourceRunId) return { kind: "deferred" as const };
+
+            // Offer the input to the active Dot, but keep a durable queued wake
+            // until it reads the comment. A finish racing the event tick must
+            // leave unread input available for the next assignment.
+            const dotBindingId = readNonEmptyString(parseObject(agent.adapterConfig).dotBindingId);
+            const dotFollowUp = agent.adapterType === "paperclip_runner" && parseObject(agent.adapterConfig).provider === "openai_dot"
+                && dotBindingId && activeExecutionRun.agentId === agentId && issue.assigneeAgentId === agentId
+                && reason === "issue_commented" && wakeCommentId && opts.allowRunCoalescing !== false
+                && enrichedContextSnapshot.forceFreshSession !== true && !explicitResumeSession && !opts.manualUserWake
+                && !enrichedContextSnapshot.interactionId && !payload?.interactionId && !receiptRequest
+                ? await publishActiveDotComment(tx as unknown as Db, { companyId: agent.companyId, agentId,
+                  bindingId: dotBindingId, runId: activeExecutionRun.id, issueId: issue.id, commentId: wakeCommentId }) : false;
+            if (dotFollowUp) {
+              const [pending] = dotFollowUp.consumed ? [] : await tx.select().from(agentWakeupRequests).where(and(
+                eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agentId),
+                isNull(agentWakeupRequests.runId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                sql`${agentWakeupRequests.payload}->>'dotAssignmentFollowUp' = ${dotFollowUp.assignmentId}`,
+                opts.requestedByActorType ? eq(agentWakeupRequests.requestedByActorType, opts.requestedByActorType) : isNull(agentWakeupRequests.requestedByActorType),
+                opts.requestedByActorId ? eq(agentWakeupRequests.requestedByActorId, opts.requestedByActorId) : isNull(agentWakeupRequests.requestedByActorId),
+              )).for("update").limit(1);
+              if (pending) await tx.update(agentWakeupRequests).set({
+                payload: withQueuedCommentIdsInWakePayload(pending.payload,
+                  [...new Set([...queuedCommentIdsFromWakePayload(pending.payload), wakeCommentId!])]),
+                coalescedCount: pending.coalescedCount + 1, updatedAt: new Date(),
+              }).where(and(eq(agentWakeupRequests.id, pending.id), eq(agentWakeupRequests.companyId, agent.companyId),
+                eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.status, "deferred_issue_execution")));
+              else await tx.insert(agentWakeupRequests).values({ companyId: agent.companyId, agentId, source, triggerDetail,
+                reason, payload: withQueuedCommentIdsInWakePayload({ ...payload, issueId: issue.id,
+                  dotAssignmentFollowUp: dotFollowUp.assignmentId,
+                  [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot }, [wakeCommentId!]),
+                status: dotFollowUp.consumed ? "coalesced" : "deferred_issue_execution",
+                runId: dotFollowUp.consumed ? activeExecutionRun.id : null,
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null, idempotencyKey: opts.idempotencyKey ?? null,
+                finishedAt: dotFollowUp.consumed ? new Date() : null });
+              return { kind: "coalesced" as const, run: activeExecutionRun };
+            }
 
             const admissionScope = wakeQueue.createAdmissionTransactionScope(
               agent.companyId,

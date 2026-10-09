@@ -22,6 +22,100 @@ for the exact source/image evidence and merge status.
 All dated checkpoints below describe historical qualification attempts. Their
 failures and profile numbers are retained; they are not current release gates.
 
+## Historical Pi 1.0 qualification checkpoint — October 2, 2026
+
+Pi uses `@earendil-works/pi-coding-agent@1.0.0`, `pi-acp@0.0.33`, and ACPX
+`0.13.1`. Profile **13** adds explicit, native-acknowledged reasoning selection
+for the exact model `openrouter/deepseek/deepseek-v4-flash-0731`. New Pi
+configuration and qualification cases select `low`. This candidate is not yet
+production qualified. Cursor v10 and Copilot v13 remain gated.
+
+The installed profile-13 candidate at `eac50643213d0902a93a5384bae2f1d6c065c9f2`
+has paid local passes for hello, semantic question continuation, all four native
+question forms, and human permission denial without a file side effect. Its
+paid extended Runner `get-task-context` case passes against the authenticated
+seeded test control plane. That protocol case does not qualify the Product UI.
+File validation, pending-input controller restart, and three-turn warm
+continuation remain failed and unregraded. Assertion repairs and an actual
+SDK/wrapper replay now cover the identified boundaries; fresh live proof is
+still required. See the [historical Pi checkpoint](runner-pi-capabilities.md#historical-profile-13-qualification-checkpoint-2026-10-02)
+for the request-stream diagnosis and remaining platform gates.
+
+Copilot's declaration hashes the shared sidecar, sidecar protocol, direct driver,
+and generated schema bundle. Pi's reasoning field changed those four files, so
+Copilot's pending declaration advances to v13 with digest
+`sha256:3ff08fbe76fe4549c9eb01e8794428d8909c65c151d775220f2ec111d9e6f7c1`.
+Its executable, distribution closure, model, permissions, and qualification
+status are unchanged. The v12 declaration remains historical, and v12 warm
+sessions are rejected. This source-identity repair supplies no Copilot paid proof.
+
+The first profile-13 source (`f5c5fde38`) built a fresh ARM daemon and Pi pack,
+then passed original startup and all 61 native/ACP contract tests without model
+calls. Its full Runner suite found three missing-mode test fixtures and the
+stale Copilot declaration. Those failures are retained. The corrected final
+source still requires fresh platform builds, complete checks, and paid tests.
+
+Profile 12 passed one paid local hello through the actual installed public
+CLI/server and normal runtime setup. The next question-continuation case failed
+at the unchanged 120-second native deadline: Pi emitted 1,019 reasoning deltas,
+but no tool call or question. The tool and schema were present. One native turn
+was submitted; the two visible start rows were canonical and mirrored activity,
+not evidence of two provider requests. Both attempts completed owned-process,
+IPC, temporary-root, installed-inventory, and post-run accounting checks.
+
+The dedicated key recorded $0.000510742 for the hello and $0.004995065 for the
+failed question. Including the earlier profile-11 failure ($0.000142518), its
+observed total was $0.005648325 at that reconciliation. These are observed key
+usage changes, not native per-request bills. No failed result has been regraded.
+
+Diagnosis found that the runner did not select the ACP reasoning mode. The
+pinned model's implicit Pi `medium` setting resolves to `high`; this behavior
+also existed in Pi 0.84.2. Pi 1.0 exposes a genuine `low` level. Profile 13 carries
+an explicit setting through configuration, transport, and durable identity,
+and requires the native effective level to match before a prompt is sent.
+It does not increase the timeout. The timed-out HTTP body was not captured,
+so source-derived default mapping does not establish the cause of that failure.
+Fresh qualification must use the new profile and exact final build.
+
+Historical source `4c58da84fd86a0cd7bc1d952987b031786fc6b2b` passed full Runner
+verification and normal Intel startup at 28.295 seconds under the original
+30-second limit, plus all 48 native/ACP contract tests. The Intel result has
+only 1.705 seconds of margin and does not establish broad cold-start reliability.
+Its fresh Linux daemon, Pi pack, and image were built and inventoried; live
+Daytona qualification remained pending. The public Mac installation reproduced
+the complete Pi dependency closure using npm 11.19.0 from the verified Node
+archive. None of these artifacts qualifies profile 13.
+
+The same source's full repository check failed six stale test assertions and
+an `ETXTBSY` binary-staging error; the downstream Grok check then lacked built
+server output. Typecheck, token gates, and Product E2E typecheck/unit checks
+passed. The stale assertions have targeted repairs. A Linux process owner was
+not captured for `ETXTBSY`; two exact native fixtures later passed on ARM with
+all owned daemon handles closed, which does not resolve the Linux failure.
+The next complete source run retains bounded executable-holder evidence around
+check boundaries. A later run on obsolete harness source was canceled by the
+lead and is retained as incomplete, not successful verification.
+
+Normal Daytona setup has an explicit operator command to import a verified
+Linux companion into the installed server. It binds the trusted manifest to the
+installed source, Pi profile, daemon, and complete provider-pack inventory, then
+uses ordinary remote execution without test-only binary or pack overrides.
+The final installed import, image publication, and paid proof remain required.
+
+The dedicated Pi test key has a $5 lifetime OpenRouter-credit limit. Its BYOK
+charges are outside that provider-enforced limit, so qualification additionally
+uses the reviewed no-BYOK operational policy, fresh account/key evidence, one
+paid case at a time, and usage monitoring. The $5 reservation is counted once
+within the combined $100 campaign budget. Native price estimates are never
+substituted for provider bills.
+
+The [Pi capability inventory](runner-pi-capabilities.md#historical-pi-10-candidate-2026-10-02-profile-v13)
+records native interfaces, ACP mappings, user surfaces, and explicit gaps.
+The comparison below remains the supported-surface map; old observations retain
+their exact historical profile identities. Final source checks and profile-13
+local Product, Runner protocol, native-control, and Daytona qualification remain
+pending.
+
 Historical source checkpoint (2026-10-01): **Cursor v10, Copilot v12 and Pi v10
 remain unqualified**. Copilot receipt v2 distinguishes original provider
 arguments from the validated outgoing completion input. The sidecar commits
@@ -73,7 +167,7 @@ as `25303cf84953985b961b95f89aff0bdb864b2d65`, from head
 unchanged; this adds no paid proof. Those definitions remain the historical
 Cursor v8 checkpoint and require a separate reviewed Cursor v9 update.
 
-Current checkpoint (2026-09-30): **Cursor v9, Copilot v8 and Pi v10 remain unqualified.** The frozen runtime is `5c69b69ef2aeab8d8a367b25a8d894cc5308befa`; controller candidate is `a8df2064d68f40fbf4dec670c4b8478c4b1b1b3f`. All profiles bind shared ACPX patch SHA-256 `bd5393058a218040d217fa85449d59a6f30507de54cd645bf0ef21422823f85e`. No profile is promoted and no prior grade is changed.
+Historical checkpoint (2026-09-30): **Cursor v9, Copilot v8 and Pi v10 remain unqualified.** The frozen runtime is `5c69b69ef2aeab8d8a367b25a8d894cc5308befa`; controller candidate is `a8df2064d68f40fbf4dec670c4b8478c4b1b1b3f`. All profiles bind shared ACPX patch SHA-256 `bd5393058a218040d217fa85449d59a6f30507de54cd645bf0ef21422823f85e`. No profile is promoted and no prior grade is changed.
 
 Current-profile protocol eval definitions merged in [paperclip-evals #36](https://github.com/paperclipai/paperclip-evals/pull/36) as `d987357461933baca0d4c10cc081f40e7eae5c1b`: 136 deterministic tests and 21 validated cells. These definitions do not supply paid qualification evidence.
 
@@ -683,22 +777,22 @@ deterministic evidence are mapped separately after the comparison.
 
 | Capability | Codex app-server benchmark | Cursor ACP candidate | Copilot ACP candidate | Pi ACP candidate |
 | --- | --- | --- | --- | --- |
-| Exact model | Selected and reported model | Explicit ID required; exact echo, paid semantic protocol and five local semantic product cases passed | Explicit ID required; exact `gpt-5.6-luna` echo, paid semantic protocol and local completion/file/plan/restart passed | Exact `openrouter/deepseek/deepseek-v4-flash-0731`; model echo and v2/v3 paid Product completion/file/question cases passed; v5 native controls passed |
+| Exact model | Selected and reported model | Explicit ID required; exact echo, paid semantic protocol and five local semantic product cases passed | Explicit ID required; exact `gpt-5.6-luna` echo, paid semantic protocol and local completion/file/plan/restart passed | Exact `openrouter/deepseek/deepseek-v4-flash-0731`, native-verified `low`; profile-13 paid hello, semantic continuation, native questions and human denial pass; file/restart/warm failures remain open |
 | Text and tools | Typed thread/turn/item events | Standard ACP updates; child activity kept separate | Standard ACP plus opt-in native session events | Wrapper text/tool updates and owned tool gates |
-| Active steering | Dedicated `turn/steer` | Concurrent prompt replaces/cancels, so it is not steering | Concurrent prompt replaces/cancels, so it is not steering | Owned `pi/steer` requires handshake, exact active turn and acknowledgment; real active-turn probe passed |
-| Queued follow-up | Product continuation controls | Controller can schedule a later prompt; native queue not established | Native pending-message activity exists; no qualified ACP queue responder | Owned `pi/follow_up`, separately named and ordered; real queued marker followed the steered current response |
+| Active steering | Dedicated `turn/steer` | Concurrent prompt replaces/cancels, so it is not steering | Concurrent prompt replaces/cancels, so it is not steering | Owned `pi/steer` requires handshake, exact active turn and acknowledgment; historical probe passed, profile-13 paid proof pending |
+| Queued follow-up | Product continuation controls | Controller can schedule a later prompt; native queue not established | Native pending-message activity exists; no qualified ACP queue responder | Owned `pi/follow_up`, separately named and ordered; historical marker-order proof, profile-13 paid proof pending |
 | Cancellation | Typed interrupt and process lifecycle | ACP cancel; paid command cleanup pending | ACP cancel; attached async native settlement passes offline. Explicit detached work is rejected before side effects; it is not supported background settlement | Native abort; wrapper waits for `agent_settled` and treats provider errors as failure |
 | Session continuity | Read/load/history/fork and durable identity | Session load/list observed; paid semantic warm continuation passed; native history replay unverified and fork absent in tested methods | Session load plus native history events; semantic pending-question controller recovery passed | Private Pi JSONL mapping/load; native RPC `fork`, `clone`, `get_fork_messages` are not mapped through this ACP wrapper; unresolved UI promises cannot survive provider death |
 | Questions | Typed input requests and response correlation | `cursor/ask_question`, option identity and multiple selection preserved | Native ask-user capability exists, but pinned ACP does not wire its responder; do not display a false answerable form | `select`, `confirm`, `input`, `editor` through typed form elicitation |
 | Permissions | Durable typed approvals | Standard ACP permission options; denied shell write had no observed side effects; separately labeled exact-correlation assessment | Standard ACP; real native reject_once prevented marker creation; session decision scope inspected | Native pre-tool gate; allow once, exact-operation session grant, deny; paths rechecked after wait |
 | Plans | Typed plan and collaboration mode | `cursor/create_plan` includes full plan and revision-bound accept/reject/cancel; todo activity separate | Native plan events displayed; native plan-decision callback not exposed in ACP | No native structured plan event; authenticated Paperclip planning tools available |
-| Authenticated tools | Runner bridge and governed operations | ACP HTTP MCP binding; paid context/history reads passed | ACP HTTP MCP binding; paid context read passed | Owned extension registers exact bound MCP tools; four authenticated semantic reads succeeded in a paid partial run; no ambient servers |
+| Authenticated tools | Runner bridge and governed operations | ACP HTTP MCP binding; paid context/history reads passed | ACP HTTP MCP binding; paid context read passed | Owned extension registers exact bound MCP tools; profile-13 paid Product completion/questions and seeded Runner context pass; no ambient servers |
 | Delegation | Typed agent roles and lifecycle | Opt-in subagent lifecycle, nested ownership and bounded child activity; never parent transcript flattening | Native session details retain agent/model fields with unknown originating turn; typed turn-owned delegation is not inferred | No built-in ACP delegation protocol; arbitrary extensions are excluded |
 | Files/diffs | Typed file changes and artifact references | Standard tool changes plus validated image references | Correlated ACP tool events remain available; native session file/workspace details are session notices, not attributed task file changes | Wrapper-retained read/write/edit diffs; common typed/UI projection remains partial; semantic artifact tools |
 | Images/artifacts | Typed references and registered work products | Existing contained files only, provenance, `registered:false` | Native session artifact details are bounded notices with no inferred turn ownership or automatic registration | Image/resource tool blocks preserved by wrapper; dedicated artifact channel absent |
 | Image/attachment input | Typed input conversion | ACP advertises images, but the runner turn converter currently forwards text only | ACP advertises images/embedded context, but the runner turn converter currently forwards text only | Native Pi/ACP image input exists, but the runner turn converter currently forwards text only |
 | Usage | Per-request receipt and model context | Pinned ACP omitted receipts on denied and successful turns; account UI confirms included usage separately | ACP/native tokens retained; account UI confirms included credits separately, without a per-run USD receipt | Assistant-message and compaction token receipts; dollar cost is a catalog pricing estimate, never authoritative billing |
-| Config/model changes | Typed configurable controls | Agent/Plan/Ask setup is bound to native configuration acknowledgements and recovery; unsolicited mode drift fails admission. Rich parameterized model picker remains unused | Model/reasoning/mode options exist; runtime policy remains authoritative | Exact pinned candidate model; arbitrary slash commands/config/extensions disabled |
+| Config/model changes | Typed configurable controls | Agent/Plan/Ask setup is bound to native configuration acknowledgements and recovery; unsolicited mode drift fails admission. Rich parameterized model picker remains unused | Model/reasoning/mode options exist; runtime policy remains authoritative | Exact model; native available levels and set/get-state confirmation map through ACP mode/config to typed `piThinkingLevel`, recovery identity and UI setup. Active-turn mode changes and arbitrary slash commands/extensions remain disabled |
 | Reconnect/restart | Durable controller replay and qualified provider restoration | Semantic pending question survived a real controller restart; exact native callback restoration remains unverified | Semantic pending question survived controller restart with the same interaction and provider session; native callback restoration remains unverified | Wrapper explicitly advertises live-process-only pending-input recovery |
 
 | Shared capability | User-visible surface | Inspectable implementation / deterministic evidence |
@@ -763,7 +857,7 @@ configuration defaults to full auto; it never overrides read-only task policy.
 ## Distribution and isolation
 
 Cursor pins `2026.09.26-dd393fe`; Copilot pins `1.0.88`; Pi pins wrapper `0.0.33`,
-runtime `1.0.0` (Pi profile v12), portable Node and its full npm lock. Native distribution hashes
+runtime `1.0.0` (Pi profile v13), portable Node and its full npm lock. Native distribution hashes
 cover macOS ARM64, macOS x64 and Linux x64. Source-owned closure pins remain
 separate from profile declaration digests. Native admission reads held files,
 verifies every admitted byte, creates a private immutable snapshot and retains
@@ -792,8 +886,8 @@ qualification gates, not claims that a JavaScript path check confines a shell.
 
 | Priority | Exposed but unused, partial, or unverified | Reason and next proof |
 | --- | --- | --- |
-| P0 | Remaining paid product cases on local and Daytona | Current Cursor7/Copilot7/Pi9 require authenticated local and Daytona evidence on the exact current runtime. Historical Cursor4 passed hello/question/plan/restart but its latest file marker failed despite correct bytes. Copilot4 passed all five basic local journeys and Daytona hello. Pi7 passed native questions but continuation exposed the final-message bug repaired in8. The semaphore blocker is resolved and Cursor's approved on-demand cap is $25. Native interaction, denial, settlement, platform and complete cost/cleanup gates remain open; no old profile pass qualifies new bytes. |
-| P0 | Pi fresh-profile Product verification | Historical v4 plan startup failed with unavailable Postgres semaphores. Historical v6 attempts exposed profile admission and verified-runtime startup faults, repaired without raising deadlines. Preserve every failed attempt and run unchanged canonical cases against the final build; do not remove unrelated IPC objects. |
+| P0 | Remaining paid product cases on local and Daytona | Current Cursor10/Copilot13/Pi13 require authenticated local and Daytona evidence on the exact current runtime. The current Pi checkpoint above supersedes older profile coverage. Historical Cursor4 passed hello/question/plan/restart but its latest file marker failed despite correct bytes. Copilot4 passed all five basic local journeys and Daytona hello. Pi7 passed native questions but continuation exposed the final-message bug repaired in8. The semaphore blocker is resolved and Cursor's approved on-demand cap is $25. Native interaction, denial, settlement, platform and complete cost/cleanup gates remain open; no old profile pass qualifies new bytes. |
+| P0 | Pi profile-13 Product and platform verification | Four paid local cases and one seeded Runner case pass. File validation, pending-input restart and warm continuation remain failed; assertion repairs do not regrade them. Finish the remaining local, Runner/native-control, Intel startup and Linux/Daytona cases on fresh final builds. Earlier semaphore and v6 startup faults remain historical evidence; never remove unrelated IPC objects. |
 | P0 | Copilot native ask-user and plan-decision callbacks | Pinned ACP does not install native responders. Prove no blocking request is exposed, or add a qualified responder/wrapper; never swallow the request. |
 | P0 | Broader Copilot denial and background settlement qualification | Pinned 1.0.88 and isolated 1.0.89 settle attached async commands, but deliberately detached work can finish after end_turn. The earlier paid detached success depended on that model waiting and is not general settlement evidence. Profiles v3/v4 reject explicit detached admission before effects; governed long-lived background work remains unsupported. Denial and process-death recovery pass offline; paid local/Daytona proof remains required. |
 | P0 | Cursor native question availability | Explicit Luna and Composer native-only Plan-mode probes admitted the selected model and trusted instructions but emitted no question callback. The vendor-patch reversal and actual MCP-context constructor proof identify no local native-tool removal. Effective native tool selection is beyond the remote AgentService boundary; seek upstream catalog/availability evidence. No further blind model grid or semantic-question substitution qualifies this feature. |
@@ -808,7 +902,7 @@ qualification gates, not claims that a JavaScript path check confines a shell.
 | P1 | User attachments and image prompting | `AcpxRuntimeTurnInput` and the common runtime adapter currently forward text only, despite underlying image-input support. Implement validated attachment-to-ACP content conversion and model-specific capability admission, then qualify real local/Daytona image prompts. This is an implementation gap as well as a live-verification gap. |
 | P1 | Copilot native session event attribution | `_session_event` omits an originating turn. Preserve bounded event fields as session-scoped notices with `turnAttribution: unknown`; typed delegation, artifacts and compaction need an explicit native correlation contract before turn-owned projection. Standard correlated ACP events remain separate. |
 | P1 | Copilot session-store files and export/artifact URIs | Provider paths are not task-workspace paths. Add a separately authorized export flow with validated bytes and provenance; do not resolve arbitrary URLs or auto-register. |
-| P1 | Pi native fork/history/export interfaces | Pinned Pi 0.84.2 native RPC exposes `fork(entryId)`, `clone`, `get_fork_messages` and `export_html`. The wrapper does not map them to runner controls. Add durable branch lineage for fork/clone and an authorized, contained artifact flow for HTML export before exposing them; do not label these native capabilities absent. |
+| P1 | Pi native fork/history/export interfaces | Pi native RPC exposes `fork(entryId)`, `clone`, `get_fork_messages` and `export_html`; these remain available in the pinned 1.0.0 release. The wrapper does not map them to runner controls. Add durable branch lineage for fork/clone and an authorized, contained artifact flow for HTML export before exposing them; do not label these native capabilities absent. |
 | P1 | Complete usage/billing provenance | Missing cache fields remain unknown. Pi price estimates are displayed separately. Budget qualification requires actual spend coverage, not an estimate presented as a bill. |
 | P1 | Fork/history and richer configuration controls | Cursor session mode now has explicit admission-bound setup. Arbitrary session discovery/forking, mid-turn configuration changes and the parameterized model picker still need company-scoped controls and durable lineage. |
 | P1 | Exact pending-request restoration after process death | Session transcript restoration does not restore callbacks. Expire unresolved requests unless a provider proves exact restoration. |
@@ -816,7 +910,7 @@ qualification gates, not claims that a JavaScript path check confines a shell.
 | P2 | Remaining Copilot native diagnostic/config/account events | The provider inventory records every event and field, its projection or reason for omission. Preserve bounded useful context; avoid credentials, raw environment or unbounded blobs. |
 | P2 | Pi empty or whitespace-only submitted input/editor text | Canonical required text rejects blank responses; optional blank responses are omitted. Defaults can be empty and nonblank text preserves boundary whitespace. Add explicit empty-text semantics across TypeScript, Rust and UI before claiming complete native empty-answer parity. |
 | P2 | Pi native extension surfaces and unsupported slash commands | Arbitrary extensions/templates/themes may execute ambient code. Only reviewed runner-owned capabilities are admitted; structured native plan/goals are not fabricated. Native fork/clone/export are separate unmapped capabilities above. |
-| P2 | Pi status/widget/title/editor and session/configuration notifications | `setStatus`, `setWidget`, `setTitle` and `set_editor_text` have no UI projection and are unused by the owned extension. Native session-name and thinking-level events also lack a dedicated projection. Add reviewed bounded notice schemas and governed configuration controls before exposing these fields; `notify` and interactive input already have separate bridges. |
+| P2 | Pi status/widget/title/editor and session/configuration notifications | `setStatus`, `setWidget`, `setTitle` and `set_editor_text` have no UI projection and are unused by the owned extension. Native session-name and thinking-level notifications also lack a dedicated projection, although selected thinking level is now handled through ACP mode/config and native confirmation. Provider notice summary/severity has deterministic UI coverage, with rebuilt paid visual proof pending. Add bounded schemas for the remaining fields; `notify` and interactive input already have separate bridges. |
 | P2 | Pi invocation and history provenance metadata | The v4 wrapper retains `nativeToolCallId`, `modelIteration`, `historyMessageIndex` and `identityScope` in private ACP-wire metadata. Closed common tool and permission projections omit them from the UI. Normalized IDs still correlate live tool, MCP and permission events. Add bounded, redacted display-only provenance fields and parity tests before surfacing the native metadata. |
 | P2 | Conditional native-plan follow-up fields | Cursor's optional rejection-reason field also appears for accept/cancel. The current question renderer has no conditional fields; add conditional presentation without changing the revision-bound decision receipt. |
 | P2 | Cursor command exit code projection | The paid file case preserved native `exitCode: 0` inside output text, while the canonical command field remained null. Normalize a typed, correlated exit code without parsing arbitrary prose; current independent file assertions do not prove this field. |

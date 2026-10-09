@@ -85,6 +85,7 @@ const apiPrefixes: Record<string, string> = {
 
 const ROUTE_LITERAL_PATTERN =
   /router\.(get|post|put|patch|delete)\(\s*["'`]([^"'`]+)["'`]/g;
+const ROUTE_ARRAY_PATTERN = /router\.(get|post|put|patch|delete)\(\s*\[([^\]]+)\]/g;
 const ROUTER_METHOD_PATTERN = /router\.(get|post|put|patch|delete)\(/;
 const HTTP_METHODS = new Set([
   "get",
@@ -106,6 +107,8 @@ const explicitOpenApiOperationCoverageExclusions = new Set([
   "POST /api/customer-success/v1/read",
   // OAuth discovery and protocol endpoints have their own metadata contract;
   // browser connection-management operations remain documented in the board API.
+  // Markdown rendering of the separately documented assistant setup page.
+  "GET /api/mcp/setup.md",
   "GET /.well-known/oauth-authorization-server",
   "POST /mcp/oauth/register",
   "POST /mcp/oauth/device_authorization",
@@ -215,6 +218,14 @@ function loadActualRoutes() {
       }
     }
 
+    for (const match of source.matchAll(ROUTE_ARRAY_PATTERN)) {
+      for (const literal of match[2].matchAll(/["'`]([^"'`]+)["'`]/g)) {
+        const operation = `${match[1].toUpperCase()} ${normalizeExpressPath(resolveMountedPath(file, prefix, literal[1]))}`;
+        if (explicitOpenApiOperationCoverageExclusions.has(operation)) excludedRoutes.add(operation);
+        else routes.add(operation);
+      }
+    }
+
     if (file === "public-mcp.ts") {
       // The shared gateway mounts these protocol paths for each OAuth resource.
       if (source.includes("router.get(metadataPath,")) {
@@ -279,6 +290,28 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents only writable agent update fields and lifecycle status requests", () => {
+    const document = buildOpenApiSpec() as any;
+    const properties = document.paths["/api/agents/{id}"].patch.requestBody.content["application/json"].schema.properties;
+    expect(properties).not.toHaveProperty("spentMonthlyCents");
+    expect(properties.status.enum).toEqual(["paused", "idle", "terminated"]);
+    expect(properties).toHaveProperty("name");
+    expect(properties).toHaveProperty("budgetMonthlyCents");
+  });
+
+  it("documents public Dot pairing capabilities while ordinary consent keeps board authentication", () => {
+    const spec = buildOpenApiSpec() as any;
+    for (const [method, path] of [
+      ["get", "/api/dot-mcp/requests/{id}"],
+      ["post", "/api/dot-mcp/requests/{id}/dot-pairing"],
+      ["post", "/api/dot-mcp/requests/{id}/dot-pairing/preview"],
+    ]) {
+      expect(spec.paths[path][method].security).toEqual([]);
+      expect(spec.paths[path][method].responses["404"]).toBeDefined();
+    }
+    expect(spec.paths["/api/mcp/requests/{id}/consent"].post.security).not.toEqual([]);
+  });
+
   it("documents manager-only task privacy hints without protected scope identity", () => {
     const spec = buildOpenApiSpec() as any;
     const operation = spec.paths["/api/issues/{id}/privacy-constraints"].get;
