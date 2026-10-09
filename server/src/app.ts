@@ -8,6 +8,7 @@ import { browserUseService } from "./services/browser-use.js";
 import { slackToolRoutes } from "./routes/slack-tools.js";
 import { createPublicMcpOAuth, publicMcpConfig } from "./services/public-mcp/oauth.js";
 import { createDotRunnerMcpTools } from "./services/dot-runner-broker.js";
+import { agentProfileAvatarRoutes } from "./routes/agent-profile-avatar.js";
 import { dotRunnerRoutes } from "./routes/dot-runner.js";
 import { createPublicMcpTransfers } from "./services/public-mcp/file-transfers.js";
 import { createMcpApiDispatch, createPublicMcpExecutor } from "./services/public-mcp/capabilities.js";
@@ -490,6 +491,7 @@ export async function createApp(
       }): Promise<unknown>;
     };
     databaseBackupService?: InstanceDatabaseBackupService;
+    prepareIdleDatabaseBackup?: () => Promise<boolean>;
     databaseBackupHealth?: InspectDatabaseBackupHealthOptions;
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
@@ -781,6 +783,7 @@ export async function createApp(
     }),
   );
   api.use(assetRoutes(db, opts.storageService));
+  api.use(agentProfileAvatarRoutes(db, opts.storageService));
   api.use(projectToolRoutes(db));
   api.use(projectRoutes(db));
   api.use(caseRoutes(db, opts.storageService));
@@ -834,7 +837,7 @@ export async function createApp(
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));
   api.use(inboxDismissalRoutes(db));
-  api.use(instanceSettingsRoutes(db, workerManager));
+  api.use(instanceSettingsRoutes(db, workerManager, opts.prepareIdleDatabaseBackup));
   if (opts.databaseBackupService) {
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
