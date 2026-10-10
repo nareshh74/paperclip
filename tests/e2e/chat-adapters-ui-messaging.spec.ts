@@ -566,7 +566,7 @@ test.describe("Board send delivery refresh", () => {
     const endpointId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const conversationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     await page.route("**/api/instance/settings/experimental", (route) =>
-      fulfill(route, { enableChatConnectors: true }),
+      fulfill(route, { enableChatConnectors: false, enableGitHubReviewBots: true }),
     );
     await page.route(`**/api/issues/${issue.id}/chat-binding`, (route) =>
       fulfill(route, {
@@ -1435,12 +1435,12 @@ test.describe("Exact failed chat run retry", () => {
 
         const startPath =
           surface === "agent run"
-            ? `/${seed.prefix}/agents/${seed.agentId}/runs/${failedRunId}`
+            ? `/${seed.prefix}/agents/maya/runs/${failedRunId}`
             : `/${seed.prefix}/inbox/all`;
         await page.goto(startPath);
         if (surface === "agent run") {
-          // Canonicalization reloads the agent query. Interact after that
-          // navigation so a remount cannot discard the retry mutation result.
+          // Begin on the canonical route: observing the URL replacement
+          // alone can race the remount and discard retry mutation feedback.
           await expect(page).toHaveURL(
             new RegExp(`/${seed.prefix}/agents/maya/runs/${failedRunId}$`),
           );

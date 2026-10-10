@@ -1,3 +1,4 @@
+import { voiceSessionRoutes, voiceWebhookRoutes } from "./routes/voice-sessions.js";
 import { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { createLifecycleDriver } from "./services/agent-lifecycle-driver.js";
@@ -606,6 +607,31 @@ export async function createApp(
   // must be reachable by remote adapters that intentionally do not receive an
   // agent API key. Every request revalidates the active heartbeat row.
   app.use(runtimeConnectionIntentRoutes(db));
+  const hostServicesDisposers = new Map<string, () => void>();
+  const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  let lifecyclePluginsReady = false;
+  const agentLifecycle = startAgentLifecycle(db, createLifecycleDriver(db, workerManager), () => lifecyclePluginsReady && !isWarmStandby() && !isIdleTaskDrainActive());
+  const connectionIntentHeartbeat = heartbeatService(db, {
+    pluginWorkerManager: workerManager,
+  });
+  const chatChannels = chatChannelService(db, {
+    allowLocalVoiceBoard: opts.deploymentMode === "local_trusted",
+    deferWebhookProcessing: true,
+    heartbeat: connectionIntentHeartbeat,
+    publicBaseUrl: opts.authPublicBaseUrl,
+    githubWizardOrigin: opts.deploymentMode === "local_trusted"
+      && ["127.0.0.1", "localhost", "::1"].includes(opts.bindHost ?? "")
+      && Number.isInteger(opts.serverPort) && opts.serverPort! > 0
+      ? `http://${opts.bindHost === "::1" ? "[::1]" : opts.bindHost}:${opts.serverPort}` : null,
+    webhookPublicBaseUrl: opts.chatWebhookPublicBaseUrl,
+    resolveNativeQuestion: (interaction) =>
+      deliverNativeQuestionResponse(db, interaction),
+    storage: opts.storageService,
+  });
+  // Voice capabilities are verified by the signed callback route, not by
+  // board/agent bearer authentication. Mount before actorMiddleware so its
+  // per-session Bearer cannot be mistaken for an agent API key.
+  app.use(voiceWebhookRoutes(db, chatChannels.voice));
   app.use(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
@@ -622,26 +648,11 @@ export async function createApp(
   }
   app.use(llmRoutes(db));
 
-  const hostServicesDisposers = new Map<string, () => void>();
-  const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
-  let lifecyclePluginsReady = false;
-  const agentLifecycle = startAgentLifecycle(db, createLifecycleDriver(db, workerManager), () => lifecyclePluginsReady && !isWarmStandby() && !isIdleTaskDrainActive());
-  const connectionIntentHeartbeat = heartbeatService(db, {
-    pluginWorkerManager: workerManager,
-  });
-  const chatChannels = chatChannelService(db, {
-    deferWebhookProcessing: true,
-    heartbeat: connectionIntentHeartbeat,
-    publicBaseUrl: opts.authPublicBaseUrl,
-    webhookPublicBaseUrl: opts.chatWebhookPublicBaseUrl,
-    resolveNativeQuestion: (interaction) =>
-      deliverNativeQuestionResponse(db, interaction),
-    storage: opts.storageService,
-  });
   // Provider-authenticated ingress is intentionally outside the board
   // mutation guard. The Chat SDK adapter verifies the provider signature
   // before Paperclip persists or acts on any event.
   const emailChannels = emailChannelService(db, {
+    isReconciliationEnabled: () => !isWarmStandby(),
     isBackgroundWorkEnabled: () => !isWarmStandby() && !isIdleTaskDrainActive(),
     heartbeat: connectionIntentHeartbeat,
     storage: opts.storageService,
@@ -650,12 +661,20 @@ export async function createApp(
   app.use(emailWebhookRoutes(emailChannels));
   app.use(chatWebhookRoutes(chatChannels));
   // The instance validates single-use registration state and its trusted
-  // current origin. This exact GET is the only public setup return.
+  // current origin. These exact callback routes are the public setup returns.
   app.get("/api/chat-github/manifest/callback", async (req, res) => {
     res.set("Cache-Control", "no-store");
     res.set("Referrer-Policy", "no-referrer");
-    const redirect = await chatChannels.completeGitHubRegistration(String(req.query.state ?? ""), String(req.query.code ?? ""));
+    const redirect = await chatChannels.githubWizard.directCallback(String(req.query.state ?? ""), String(req.query.code ?? ""));
     res.redirect(303, redirect);
+  });
+  app.get("/api/chat-github/cloud/callback", async (req, res) => {
+    res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer");
+    res.redirect(303, await chatChannels.githubWizard.cloudCallback(String(req.query.state ?? ""), String(req.query.registration ?? ""), typeof req.query.claim === "string" ? req.query.claim : undefined));
+  });
+  app.get("/api/chat-github/identity/callback", async (req, res) => {
+    res.set("Cache-Control", "no-store"); res.set("Referrer-Policy", "no-referrer");
+    res.redirect(303, await chatChannels.githubWizard.identityCallback(String(req.query.state ?? ""), String(req.query.code ?? "")));
   });
   const managedAutoInstallKeys = opts.managedPluginAutoInstall ?? null;
   const bundledCatalogRoot =
@@ -815,6 +834,7 @@ export async function createApp(
   api.use(goalRoutes(db));
   api.use(onboardingSeedRoutes(db));
   api.use(boardChatRoutes(db, { deploymentMode: opts.deploymentMode }));
+  api.use(voiceSessionRoutes(db, chatChannels.voice));
   api.use(approvalRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(secretRoutes(db));
   api.use(managedAgentProfileRoutes(db));
@@ -1216,7 +1236,10 @@ export async function createApp(
     await chatChannels.schedulePendingPublications();
   };
   const chatReconciliation = createChatReconciliationCoordinator({
-    reconcileProviderRuntimes: () => chatChannels.reconcileProviderRuntimes(),
+    reconcileProviderRuntimes: async () => {
+      await chatChannels.reconcileProviderRuntimes();
+      await chatChannels.voice.reconcile();
+    },
     processPendingDeliveries: () => chatChannels.processPendingDeliveries(),
     processFailedGitHubWebhookDeliveries: () =>
       chatChannels.processFailedGitHubWebhookDeliveries(),
