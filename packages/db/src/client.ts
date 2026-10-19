@@ -580,6 +580,10 @@ async function mapHashesToMigrationFiles(migrationFiles: string[]): Promise<Map<
       const content = await readMigrationFileContent(migrationFile);
       const hash = createHash("sha256").update(content).digest("hex");
       mapped.set(hash, migrationFile);
+      const lfContent = content.replaceAll(String.fromCharCode(13), "");
+      if (lfContent !== content) {
+        mapped.set(createHash("sha256").update(lfContent).digest("hex"), migrationFile);
+      }
     }),
   );
 

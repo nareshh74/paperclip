@@ -14,6 +14,7 @@ import {
   usdToUnits,
   type AiConnectionMetadata,
 } from "@paperclipai/shared";
+import { createGitHubCopilotLanguageModel } from "./github-copilot-api.js";
 import { priceCodexReceipt } from "./codex-pricing.js";
 import { priceAnthropicReceipt } from "./anthropic-pricing.js";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
@@ -193,6 +194,8 @@ export function fastResponseModel(
       ? provider.chat(model)
       : provider.responses(model);
   }
+  if (!route && metadata.provider === "github")
+    return createGitHubCopilotLanguageModel(credential, model, fetchImpl);
   if (metadata.provider === "google")
     return createGoogleGenerativeAI({ ...common, apiKey: credential })(model);
   return createXai({ ...common, apiKey: credential })(model);
@@ -246,7 +249,7 @@ export async function runFastResponseProvider(
             : !route && input.metadata.provider === "xai"
               ? { xai: { reasoningEffort: "low" } }
               : !route &&
-                  input.metadata.provider === "openai" &&
+                  (input.metadata.provider === "openai" || input.metadata.provider === "github") &&
                   /^(?:gpt-5|gpt-6|o[134])/.test(input.model)
                 ? { openai: { reasoningEffort: "low" } }
                 : {};
