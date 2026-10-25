@@ -213,6 +213,17 @@ export async function listHermesSkills(
   return buildHermesSkillSnapshot(ctx.config);
 }
 
+// A link into an older Paperclip `__versions__` snapshot is managed by Paperclip, not by the user.
+// ensurePaperclipSkillSymlink only repairs dangling links, so a still-existing old snapshot would
+// otherwise block every run with "occupied by another installation".
+async function dropStaleManagedVersionLink(target: string, source: string): Promise<void> {
+  const linked = await fs.readlink(target).catch(() => null);
+  if (!linked) return;
+  const resolved = path.resolve(path.dirname(target), linked);
+  if (resolved === path.resolve(source)) return;
+  if (resolved.split(path.sep).includes("__versions__")) await fs.unlink(target);
+}
+
 export async function reconcileHermesPaperclipSkills(
   config: Record<string, unknown>,
   requestedDesiredSkills?: string[],
@@ -233,6 +244,7 @@ export async function reconcileHermesPaperclipSkills(
   for (const entry of availableEntries) {
     if (!desiredSet.has(entry.key) || isPaperclipSkillSourceMissing(entry)) continue;
     const target = path.join(skillsHome, entry.runtimeName);
+    await dropStaleManagedVersionLink(target, entry.source);
     await ensurePaperclipSkillSymlink(entry.source, target);
     const linkedSource = await fs.readlink(target).catch(() => null);
     const resolvedSource = linkedSource

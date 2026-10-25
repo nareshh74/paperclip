@@ -154,3 +154,37 @@ test("Hermes rejects a live symlink owned by another operational skill", async (
     await fs.rm(home, { recursive: true, force: true });
   }
 });
+
+test("Hermes repoints a link into an older Paperclip skill version snapshot", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-core-stale-version-"));
+  try {
+    const versions = path.join(home, "skills", "__versions__");
+    const oldSource = path.join(versions, "old", "paperclip");
+    const source = path.join(versions, "new", "paperclip");
+    const target = path.join(home, ".hermes", "skills", "paperclip");
+    for (const dir of [oldSource, source]) {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, "SKILL.md"), "# Paperclip\n", "utf8");
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.symlink(oldSource, target);
+
+    await createServerAdapter().syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      config: {
+        env: { HOME: home },
+        paperclipRuntimeSkills: [{
+          key: "paperclipai/paperclip/paperclip",
+          runtimeName: "paperclip",
+          source,
+        }],
+      },
+    }, []);
+
+    expect(path.resolve(path.dirname(target), await fs.readlink(target))).toBe(path.resolve(source));
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
