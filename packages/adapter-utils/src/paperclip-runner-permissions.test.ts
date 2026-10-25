@@ -12,11 +12,12 @@ import {
 } from "./paperclip-runner-permissions.js";
 
 describe("Paperclip Runner permission defaults", () => {
-  it("marks Pi and Copilot qualified with their provider credential bindings", () => {
+  it("admits Pi with provider credentials while keeping Copilot pending", () => {
     expect(PAPERCLIP_RUNNER_ACPX_PROFILES.find(profile => profile.value === "pi"))
       .toMatchObject({ qualified: true, credentialEnvironment: expect.arrayContaining(["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]) });
-    expect(PAPERCLIP_RUNNER_ACPX_PROFILES.find(profile => profile.value === "copilot"))
-      .toMatchObject({ qualified: true, credentialEnvironment: ["COPILOT_GITHUB_TOKEN"] });
+    for (const agent of ["copilot"]) {
+      expect(PAPERCLIP_RUNNER_ACPX_PROFILES.find(profile => profile.value === agent)?.qualified).toBe(false);
+    }
   });
   it("defaults Codex to the only qualified non-interactive mode", () => {
     expect(resolvePaperclipRunnerPermissionMode("codex", undefined)).toBe(
