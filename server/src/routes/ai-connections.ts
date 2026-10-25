@@ -33,8 +33,6 @@ import { logActivity } from "../services/activity-log.js";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { validate } from "../middleware/validate.js";
-import { probeCopilotConnection } from "../services/copilot-connection-probe.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
 /** Agent API calls inherit authenticated run identity, never the agent's own ID. */
 export function responsibleUserForAiRequest(req: Request): string | null {
@@ -138,7 +136,7 @@ export async function canInstallSharedAiConnectionForNewAgent(
 }
 
 
-export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLocalAiLogin>[0] & { pluginWorkerManager?: PluginWorkerManager } = {}) {
+export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLocalAiLogin>[0] = {}) {
   function assertLocalLoginAvailable() {
     if (!supportsLocalAiLogin(options)) throw unprocessable("Server-host subscription sign-in is unavailable on this hosted instance. Choose a supported sign-in environment or use an API key.");
   }
@@ -305,13 +303,9 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
           "Use the existing provider sign-in flow to connect a subscription",
         );
       const attemptStartedAt = new Date();
-      if (input.provider === "github") {
-        const token = input.apiKey?.trim() ?? "";
-        if (!token || !/^(github_pat_|gh[oupsr]_)/.test(token)) {
-          throw unprocessable("Use a GitHub Copilot token (github_pat_... or gho_.../ghu_...).", { code: "COPILOT_AUTH_REQUIRED" });
-        }
-        await probeCopilotConnection(db, companyId, token, input.environmentId, undefined, { pluginWorkerManager: options.pluginWorkerManager });
-      } else if (!input.routing || input.routing.kind === "openrouter") await validateAiApiKey(input.provider, input.apiKey!);
+      // Custom destinations are exercised in the selected execution environment,
+      // never fetched by the control plane (including localhost/private URLs).
+      if (!input.routing || input.routing.kind === "openrouter") await validateAiApiKey(input.provider, input.apiKey!);
       const result = await service.save(
         companyId,
         userId,

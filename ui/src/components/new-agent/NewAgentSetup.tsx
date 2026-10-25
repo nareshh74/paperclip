@@ -128,9 +128,7 @@ function Setup({
   const isRunner = adapterType === "paperclip_runner";
   const isDot = isRunner && runnerProvider === "openai_dot";
   const brandType = isDot ? "openai_dot" : isRunner
-    ? runnerProvider === "copilot"
-      ? "copilot_runtime"
-      : runnerProvider === "grok"
+    ? runnerProvider === "grok"
       ? "grok_local"
       : runnerProvider === "claude"
       ? "claude_local"
@@ -168,9 +166,7 @@ function Setup({
     null,
   );
   const [runtimeAiBinding, setRuntimeAiBinding] = useState<AiConnectionBinding | undefined>(() =>
-    brandType === "copilot_runtime"
-      ? { provider: "github", method: "api_key", mode: "responsible_user" }
-      : brandType === "opencode_local"
+    brandType === "opencode_local"
       ? { provider: "openrouter", method: "api_key", mode: "responsible_user" }
       : undefined,
   );
@@ -243,6 +239,12 @@ function Setup({
     queryKey: queryKeys.environments.capabilities(companyId),
     queryFn: () => environmentsApi.capabilities(companyId),
   });
+  const models = useQuery({
+    queryKey: queryKeys.agents.adapterModels(companyId, brandType, null, aiBinding?.provider),
+    queryFn: () => agentsApi.adapterModels(companyId, brandType, { provider: aiBinding?.provider }),
+    enabled: Boolean(brandType) && showModel && !connectionModels,
+    retry: false,
+  });
   const companySecrets = useQuery({
     queryKey: queryKeys.secrets.list(companyId),
     queryFn: () => secretsApi.list(companyId),
@@ -283,14 +285,6 @@ function Setup({
         ? cause.message
         : "Could not resolve the environment.";
   }
-  const models = useQuery({
-    queryKey: queryKeys.agents.adapterModels(companyId, brandType, environmentId, brandType === "copilot_runtime" ? JSON.stringify(aiBinding ?? null) : aiBinding?.provider),
-    queryFn: () => agentsApi.adapterModels(companyId, brandType === "copilot_runtime" ? "paperclip_runner" : brandType, brandType === "copilot_runtime"
-      ? { provider: "acpx", acpxAgent: "copilot", aiConnection: aiBinding, environmentId }
-      : { provider: aiBinding?.provider, environmentId }),
-    enabled: Boolean(brandType) && showModel && !connectionModels && (brandType !== "copilot_runtime" || Boolean(aiBinding)),
-    retry: false,
-  });
   const environment = envs.data?.find((env) => env.id === environmentId);
   const adapters = useQuery({
     queryKey: queryKeys.adapters.availability(companyId, environmentId),
@@ -385,9 +379,9 @@ function Setup({
       ...(isRunner
         ? {
             adapterSchemaValues: {
-              provider: (runnerProvider === "claude" || runnerProvider === "grok" || runnerProvider === "copilot") ? "acpx" : runnerProvider,
+              provider: (runnerProvider === "claude" || runnerProvider === "grok") ? "acpx" : runnerProvider,
               ...(isDot ? { allowUnmeteredProvider } : {}),
-              ...((runnerProvider === "claude" || runnerProvider === "grok" || runnerProvider === "copilot") ? { acpxAgent: runnerProvider } : {}),
+              ...((runnerProvider === "claude" || runnerProvider === "grok") ? { acpxAgent: runnerProvider } : {}),
             },
           }
         : {}),
@@ -398,8 +392,8 @@ function Setup({
     }
     if (isRunner)
       Object.assign(config, {
-        provider: (runnerProvider === "claude" || runnerProvider === "grok" || runnerProvider === "copilot") ? "acpx" : runnerProvider,
-        ...((runnerProvider === "claude" || runnerProvider === "grok" || runnerProvider === "copilot") ? { acpxAgent: runnerProvider } : {}),
+        provider: (runnerProvider === "claude" || runnerProvider === "grok") ? "acpx" : runnerProvider,
+        ...((runnerProvider === "claude" || runnerProvider === "grok") ? { acpxAgent: runnerProvider } : {}),
         ...(model ? { model } : {}),
       });
     if (!aiBinding && !nextConnection?.aiConnection && hasCredentialField && binding) {
@@ -430,8 +424,6 @@ function Setup({
     return config;
   }
   function preparedConfig(nextConnection = connection) {
-    if (brandType === "copilot_runtime" && !models.data?.some(candidate => candidate.id === model))
-      throw new Error("Refresh Copilot models and select an available model before creating this agent.");
     if (isDot && !allowUnmeteredProvider) throw new Error("Acknowledge external provider billing before creating your Dot agent.");
     if (multiProvider && (!model.trim() || !model.includes("/")))
       throw new Error("Choose or enter a model in provider/model format.");
@@ -904,9 +896,7 @@ function Setup({
                         </>}
                         {!connectionAdapter && aiProviderForAdapter(brandType) && (
                           <AiConnectionField companyId={companyId} agentName={name} adapterType={brandType} model={model} environmentId={environmentId ?? undefined} value={aiBinding}
-                            onChange={binding => { binding.mode !== "router" && setRuntimeAiBinding(binding); resetTest();
-                              if (brandType === "copilot_runtime") void cache.invalidateQueries({ queryKey: ["agents", companyId, "adapter-models", brandType] });
-                            }} />
+                            onChange={binding => { binding.mode !== "router" && setRuntimeAiBinding(binding); resetTest(); }} />
                         )}
                         {(connectionModels ? connectionModels.error : models.error) && <p role="alert" className="text-sm text-destructive">Could not load models. Retry or enter a model ID manually.</p>}
                         {((showModel && !usingKimiApi) ||
@@ -917,8 +907,8 @@ function Setup({
                                 presentation={brandType === "codex_local" ? "searchable" : "native"}
                                 models={connectionModels?.models ?? models.data ?? []}
                                 loadingModels={connectionModels?.isLoading ?? models.isLoading}
-                                onRefreshModels={connectionModels?.refreshModels ?? (brandType === "copilot_runtime" ? async () => { await models.refetch(); } : undefined)}
-                                refreshingModels={connectionModels?.refreshing ?? (brandType === "copilot_runtime" ? models.isFetching : undefined)}
+                                onRefreshModels={connectionModels?.refreshModels}
+                                refreshingModels={connectionModels?.refreshing}
                                 value={model}
                                 onChange={(value) => {
                                   setModel(connectionModels?.resolveModel(value) ?? value);
@@ -943,9 +933,9 @@ function Setup({
                                 }}
                                 open={modelOpen}
                                 onOpenChange={setModelOpen}
-                                allowDefault={!multiProvider && brandType !== "copilot_runtime"}
-                                required={multiProvider || brandType === "copilot_runtime"}
-                                creatable={brandType !== "copilot_runtime"}
+                                allowDefault={!multiProvider}
+                                required={multiProvider}
+                                creatable
                                 groupByProvider={multiProvider && !connectionModels}
                                 preserveOrder={Boolean(connectionModels) || adapterCuratesModelOrder(brandType)}
                               />
@@ -1220,7 +1210,6 @@ function Setup({
                     </fieldset>
                     <RuntimeTestCard
                       variant={isDot ? "prerequisites" : "connection"}
-                      metadataOnly={brandType === "copilot_runtime"}
                       state={testState}
                       result={result}
                       error={error}
