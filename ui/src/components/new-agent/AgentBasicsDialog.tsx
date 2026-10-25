@@ -1,5 +1,4 @@
 import { useCompany } from "@/context/CompanyContext";
-import { PAPERCLIP_RUNNER_ACPX_PROFILES } from "@paperclipai/adapter-utils";
 import { useAgentAppearanceDraft } from "@/hooks/useAgentAppearanceDraft";
 import { AdapterMark } from "../AdapterMark";
 import { AgentCharacter } from "../AgentCharacter";
@@ -70,9 +69,7 @@ export function AgentBasicsDialog({
     queryFn: () => adaptersApi.list(),
     enabled: open,
   });
-  const nativeRunner = adapters?.find(adapter => adapter.type === "paperclip_runner" && adapter.loaded && !adapter.disabled);
-  const copilotAvailable = Boolean(nativeRunner) && PAPERCLIP_RUNNER_ACPX_PROFILES.some(profile => profile.value === "copilot" && profile.qualified);
-  const choices = [...(adapters ?? []).filter(
+  const choices = (adapters ?? []).filter(
     (adapter) =>
       adapter.loaded &&
       !adapter.disabled &&
@@ -83,7 +80,7 @@ export function AgentBasicsDialog({
       }) &&
       !["process", "http"].includes(adapter.type) &&
       !getAdapterDisplay(adapter.type).comingSoon,
-  ), ...(copilotAvailable ? [{ ...nativeRunner!, type: "copilot_runtime" }] : [])];
+  );
   const experimentalRunnerAvailable = experimental.data?.enableNativeRunner === true
     && adapters?.some(adapter => adapter.type === "paperclip_runner" && adapter.loaded && !adapter.disabled);
   const validAdapter = choices.some((adapter) => adapter.type === adapterType)
@@ -125,8 +122,8 @@ export function AgentBasicsDialog({
             if (step === "name") setStep("adapter");
             else if (validAdapter)
               onContinue({ name: name.trim(),
-                adapterType: ["openai_dot", "copilot_runtime"].includes(adapterType) ? "paperclip_runner" : adapterType,
-                runnerProvider: adapterType === "copilot_runtime" ? "copilot" : adapterType === "openai_dot" ? "openai_dot" : adapterType === "paperclip_runner" ? runnerProvider : "codex" });
+                adapterType: adapterType === "openai_dot" ? "paperclip_runner" : adapterType,
+                runnerProvider: adapterType === "openai_dot" ? "openai_dot" : adapterType === "paperclip_runner" ? runnerProvider : "codex" });
           }}
         >
           <div className="flex min-h-0 flex-col gap-7 overflow-y-auto px-6 pb-8 sm:px-10">
